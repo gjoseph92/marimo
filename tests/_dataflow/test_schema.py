@@ -99,6 +99,67 @@ class TestKernelDerivedSchema:
         [send_input] = [i for i in schema.inputs if i.name == "send"]
         assert send_input.constraints == {"ui": "run_button"}
 
+    def test_explicit_ui_introspects_slider_bounds(self) -> None:
+        """``ui=mo.ui.range_slider(...)`` surfaces start/stop/step constraints.
+
+        The user never spelled the bounds in ``mo.api.input``, so the schema
+        must walk the element to discover them — otherwise downstream agents
+        only see ``{"ui": "range_slider"}`` and have to guess valid values.
+        """
+        import marimo as mo
+
+        app = marimo.App()
+
+        @app.cell
+        def _():
+            month_pair = mo.api.input(
+                ui=mo.ui.range_slider(start=0, stop=23, step=1, value=[0, 11])
+            )
+            slider_pct = mo.api.input(ui=mo.ui.slider(start=0, stop=100))
+            return month_pair, slider_pct
+
+        month_pair = mo.api.input(
+            ui=mo.ui.range_slider(start=0, stop=23, step=1, value=[0, 11])
+        )
+        slider_pct = mo.api.input(ui=mo.ui.slider(start=0, stop=100))
+        schema = compute_dataflow_schema_from_globals(
+            graph=InternalApp(app).graph,
+            globals_={"month_pair": month_pair, "slider_pct": slider_pct},
+        )
+        by_name = {i.name: i for i in schema.inputs}
+        assert by_name["month_pair"].constraints == {
+            "min": 0,
+            "max": 23,
+            "step": 1,
+            "ui": "range_slider",
+        }
+        assert by_name["slider_pct"].constraints == {
+            "min": 0,
+            "max": 100,
+            "ui": "slider",
+        }
+
+    def test_explicit_ui_dropdown_surfaces_options(self) -> None:
+        import marimo as mo
+
+        app = marimo.App()
+
+        @app.cell
+        def _():
+            kind = mo.api.input(ui=mo.ui.dropdown(options=["a", "b", "c"]))
+            return (kind,)
+
+        kind = mo.api.input(ui=mo.ui.dropdown(options=["a", "b", "c"]))
+        schema = compute_dataflow_schema_from_globals(
+            graph=InternalApp(app).graph,
+            globals_={"kind": kind},
+        )
+        [kind_input] = [i for i in schema.inputs if i.name == "kind"]
+        assert kind_input.constraints == {
+            "options": ["a", "b", "c"],
+            "ui": "dropdown",
+        }
+
     def test_typing_helpers_filtered_from_outputs(self) -> None:
         """``from typing import Annotated`` shouldn't leak into outputs."""
         from typing import Annotated, Optional
