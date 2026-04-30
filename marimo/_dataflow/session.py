@@ -323,6 +323,7 @@ def _decode_schema(notification: DataflowSchemaNotification) -> DataflowSchema:
             inputs=schema.inputs,
             outputs=schema.outputs,
             schema_id=notification.schema_id,
+            graph=schema.graph,
         )
     return schema
 

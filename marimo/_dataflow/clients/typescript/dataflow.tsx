@@ -49,10 +49,36 @@ export interface OutputSchema {
   description?: string | null;
 }
 
+/**
+ * Variable-level dependency map. Each key is a variable in
+ * ``inputs`` ∪ ``outputs``; each value is the sorted list of variables
+ * (also in that universe) read by the cell that defines the key.
+ *
+ * Inputs always map to ``[]``. The graph is closed under the schema's
+ * variable set, so it's safe to traverse without bounds checks.
+ */
+export type VariableGraph = Record<string, readonly string[]>;
+
 export interface DataflowSchema {
   inputs: InputSchema[];
   outputs: OutputSchema[];
   schemaId: string;
+  graph: VariableGraph;
+}
+
+/**
+ * Coerce a raw payload into a fully-populated ``DataflowSchema``. Defends
+ * against older marimo kernels that don't yet emit ``graph`` so client code
+ * can rely on the field being present.
+ */
+function normalizeSchema(raw: unknown): DataflowSchema {
+  const r = raw as Partial<DataflowSchema>;
+  return {
+    inputs: r.inputs ?? [],
+    outputs: r.outputs ?? [],
+    schemaId: r.schemaId ?? "",
+    graph: r.graph ?? {},
+  };
 }
 
 export interface VarUpdate<T = unknown> {
@@ -190,7 +216,7 @@ export class DataflowClient {
         this.setStatus({ error: `schema fetch failed: ${resp.status}` });
         return null;
       }
-      const next = (await resp.json()) as DataflowSchema;
+      const next = normalizeSchema(await resp.json());
       const prevId = this.schema?.schemaId ?? null;
       this.schema = next;
       // Seed inputs from defaults for fields the user hasn't touched.
@@ -219,6 +245,9 @@ export class DataflowClient {
   }
 
   subscribeVar(name: string, cb: () => void): () => void {
+    // Tolerate ``useDataflowValue(maybe ?? "")`` patterns where callers
+    // conditionally bind to a variable — no listener for the empty key.
+    if (!name) return () => {};
     let listeners = this.varListeners.get(name);
     if (!listeners) {
       listeners = new Set();
@@ -237,6 +266,7 @@ export class DataflowClient {
    * decrements the refcount on unmount.
    */
   retain(name: string): () => void {
+    if (!name) return () => {};
     const next = (this.subRefcount.get(name) ?? 0) + 1;
     this.subRefcount.set(name, next);
     if (next === 1) {
@@ -491,8 +521,9 @@ export class DataflowClient {
       // Fold in any inline schema updates (currently /schema is the canonical
       // source; we still fire schema listeners so live edits in the editor
       // can reach the React app without a manual refresh).
-      const schema = data.schema as DataflowSchema | undefined;
-      if (schema) {
+      const raw = data.schema as Partial<DataflowSchema> | undefined;
+      if (raw) {
+        const schema = normalizeSchema(raw);
         this.schema = schema;
         this.setStatus({ schemaId: schema.schemaId });
         this.notifyAll(this.schemaListeners);
@@ -617,6 +648,108 @@ export function useDataflowSchema(): DataflowSchema | null {
     () => client.getSchema(),
     () => client.getSchema(),
   );
+}
+
+// ---------------------------------------------------------------------------
+// Variable-graph helpers — pure functions over ``DataflowSchema.graph``.
+// Use these to build hover popovers ("what does this depend on?"), focused
+// run requests, or DAG visualizations without round-tripping the server.
+// ---------------------------------------------------------------------------
+
+const EMPTY_DEPS: readonly string[] = [];
+
+/** Variables that ``name`` directly reads. ``[]`` for inputs / unknowns. */
+export function getDirectDeps(
+  graph: VariableGraph,
+  name: string,
+): readonly string[] {
+  return graph[name] ?? EMPTY_DEPS;
+}
+
+/**
+ * Transitive closure of upstream variables — every variable that
+ * eventually feeds ``name``. Excludes ``name`` itself; cycle-safe.
+ */
+export function getAncestors(
+  graph: VariableGraph,
+  name: string,
+): Set<string> {
+  const seen = new Set<string>();
+  const stack: string[] = [...getDirectDeps(graph, name)];
+  while (stack.length) {
+    const v = stack.pop()!;
+    if (seen.has(v)) continue;
+    seen.add(v);
+    for (const dep of getDirectDeps(graph, v)) {
+      if (!seen.has(dep)) stack.push(dep);
+    }
+  }
+  return seen;
+}
+
+/**
+ * Transitive closure of downstream variables — every variable whose
+ * value depends on ``name``. Excludes ``name``; cycle-safe.
+ */
+export function getDescendants(
+  graph: VariableGraph,
+  name: string,
+): Set<string> {
+  // Build a one-shot reverse adjacency on the fly. This is O(E) per call;
+  // memoize at the call site if you're traversing the whole graph in a
+  // hot loop.
+  const reverse = new Map<string, string[]>();
+  for (const [src, dsts] of Object.entries(graph)) {
+    for (const d of dsts) {
+      let bucket = reverse.get(d);
+      if (!bucket) {
+        bucket = [];
+        reverse.set(d, bucket);
+      }
+      bucket.push(src);
+    }
+  }
+  const seen = new Set<string>();
+  const stack: string[] = [...(reverse.get(name) ?? [])];
+  while (stack.length) {
+    const v = stack.pop()!;
+    if (seen.has(v)) continue;
+    seen.add(v);
+    for (const child of reverse.get(v) ?? []) {
+      if (!seen.has(child)) stack.push(child);
+    }
+  }
+  return seen;
+}
+
+export interface Subgraph {
+  /** ``name`` plus its full ancestor closure. */
+  nodes: Set<string>;
+  /** Filtered edge view — only edges with both endpoints in ``nodes``. */
+  edges: Array<readonly [string, string]>;
+}
+
+/**
+ * Subgraph of all variables that contribute data to ``name``: the node
+ * itself, every ancestor, and the directed edges between them. Useful
+ * for "show me everything that produced this output" popovers.
+ */
+export function getSubgraph(graph: VariableGraph, name: string): Subgraph {
+  const nodes = getAncestors(graph, name);
+  nodes.add(name);
+  const edges: Array<readonly [string, string]> = [];
+  for (const node of nodes) {
+    for (const dep of getDirectDeps(graph, node)) {
+      if (nodes.has(dep)) edges.push([node, dep]);
+    }
+  }
+  return { nodes, edges };
+}
+
+/** Returns the schema's variable graph (or ``{}`` until the schema arrives). */
+export function useDataflowGraph(): VariableGraph {
+  const schema = useDataflowSchema();
+  return schema?.graph ?? {};
 }
 
 /**

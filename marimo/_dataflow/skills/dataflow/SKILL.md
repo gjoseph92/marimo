@@ -298,13 +298,21 @@ Returns JSON `DataflowSchema`:
 {
   "inputs":   [{"name":"threshold","kind":"integer","default":20,"constraints":{"min":0,"max":100,"ui":"slider"}}],
   "outputs":  [{"name":"stats","kind":"any"}],
-  "schemaId": "f3a1c2d8e4b9..."
+  "schemaId": "f3a1c2d8e4b9...",
+  "graph":    {"threshold": [], "filtered": ["threshold"], "stats": ["filtered"]}
 }
 ```
 
 `schemaId` is a content hash. When the notebook structure changes (cells
 added/removed, signatures change), the id changes — clients can compare it
 to detect schema drift.
+
+`graph` is the variable-level dependency map: each key is a variable in
+`inputs ∪ outputs`, each value is the sorted list of variables (also in
+that universe) read by the cell that defines the key. Inputs always map
+to `[]`. The graph is closed under the schema's universe — every edge
+endpoint is guaranteed to appear in `inputs` or `outputs`, so traversal
+is bounded.
 
 ### `POST /api/v1/dataflow/run`
 
@@ -364,6 +372,52 @@ distinct `SessionConsumer`s. Practical consequences:
 - Reattaching an editor to a previously-pruned session triggers a backfill:
   cells skipped by the last pruned run are marked stale and re-executed
   on the editor's behalf, so the editor never shows stale outputs.
+
+## Inspecting dependencies (debug popovers)
+
+The schema's `graph` field gives you the full variable-level DAG, so you
+can build "what does this depend on?" popovers without any extra API
+calls. The vendored client exports pure traversal helpers:
+
+```typescript
+import {
+  useDataflowGraph,
+  useDataflowValue,
+  getAncestors,
+  getSubgraph,
+} from "./dataflow";
+
+function StatsCard() {
+  const stats = useDataflowValue<{count: number}>("stats");
+  const graph = useDataflowGraph();
+
+  // Hover-to-debug: every variable that contributes to ``stats``.
+  const upstream = useMemo(() => [...getAncestors(graph, "stats")], [graph]);
+
+  return (
+    <div title={`Depends on: ${upstream.join(", ")}`}>
+      Count: {stats?.count ?? "—"}
+    </div>
+  );
+}
+```
+
+For richer popovers, `getSubgraph(graph, name)` returns
+`{ nodes, edges }` you can render as a mini-DAG. Click handlers can then
+mount a `useDataflowValue(otherName)` for any node to inspect its raw
+value — every variable in the universe is subscribable.
+
+A focused "show me only this subgraph" run is just a subscription:
+
+```typescript
+// Subscribe only to the closure of `stats`. With no editor attached,
+// the kernel prunes every other cell out of the run.
+const { nodes } = getSubgraph(graph, "stats");
+nodes.forEach((name) => useDataflowValue(name));
+```
+
+The kernel does the pruning automatically — no separate endpoint
+needed.
 
 ## Pitfalls
 

@@ -99,6 +99,44 @@ def _collect_public_defs(graph: DirectedGraph) -> set[str]:
     return all_defs
 
 
+def _build_variable_graph(
+    graph: DirectedGraph, universe: set[str]
+) -> dict[str, list[str]]:
+    """Build a ``var → sorted list of refs`` map restricted to ``universe``.
+
+    For each cell, every public def maps to the cell's public refs that are
+    themselves in the universe. This drops builtins, modules, typing helpers,
+    and any other refs that didn't survive output filtering, so the graph
+    is closed under the schema's variable set — every node in an edge list
+    is guaranteed to appear in ``inputs`` or ``outputs``.
+    """
+    edges: dict[str, list[str]] = {name: [] for name in universe}
+    for cell_id, cell in graph.cells.items():
+        if graph.is_disabled(cell_id):
+            continue
+        defs = [
+            d
+            for d in cell.defs
+            if d in universe and not is_local(d) and not is_mangled_local(d)
+        ]
+        if not defs:
+            continue
+        refs = sorted(
+            {
+                r
+                for r in cell.refs
+                if r in universe
+                and not is_local(r)
+                and not is_mangled_local(r)
+            }
+        )
+        for d in defs:
+            # Self-references can occur when a cell rebinds something it
+            # also reads (rare, but defensible to drop from the schema).
+            edges[d] = [r for r in refs if r != d]
+    return edges
+
+
 def _is_typing_helper(value: Any) -> bool:
     """True for typing constructs like ``Annotated``, ``Optional``, etc.
 
@@ -224,11 +262,15 @@ def compute_dataflow_schema_from_globals(
         else:
             outputs.append(OutputSchema(name=name, kind=kind))
 
+    universe = {i.name for i in inputs} | {o.name for o in outputs}
+    var_graph = _build_variable_graph(graph, universe)
+
     if schema_id is None:
         schema_bytes = msgspec.json.encode(
             {
                 "inputs": [i.name for i in inputs],
                 "outputs": [o.name for o in outputs],
+                "graph": var_graph,
             }
         )
         schema_id = hashlib.sha256(schema_bytes).hexdigest()[:16]
@@ -237,6 +279,7 @@ def compute_dataflow_schema_from_globals(
         inputs=inputs,
         outputs=outputs,
         schema_id=schema_id,
+        graph=var_graph,
     )
 
 

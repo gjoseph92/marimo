@@ -233,6 +233,7 @@ def _decode_schema(raw: dict[str, Any], schema_id: str) -> DataflowSchema:
             inputs=schema.inputs,
             outputs=schema.outputs,
             schema_id=schema_id,
+            graph=schema.graph,
         )
     return schema
 
