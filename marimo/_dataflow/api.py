@@ -44,6 +44,43 @@ if TYPE_CHECKING:
 DATAFLOW_INPUT_MARKER = "_dataflow_input_metadata"
 
 
+def _introspect_constraints(element: Any) -> dict[str, Any]:
+    """Read schema constraints (``min``/``max``/``step``/``options``) off a
+    ``mo.ui.*`` element by inspecting its public attributes.
+
+    Reading from the element rather than the user-supplied kwargs means the
+    schema reflects what the slider/dropdown actually renders — important for
+    e.g. ``mo.api.input(ui=mo.ui.range_slider(start=0, stop=23))`` where the
+    user never spelled the constraints in ``mo.api.input`` itself, or for
+    elements that internally normalize their bounds.
+    """
+    constraints: dict[str, Any] = {}
+
+    # slider / range_slider / number all expose ``start`` / ``stop`` / ``step``.
+    start = getattr(element, "start", None)
+    stop = getattr(element, "stop", None)
+    if start is not None:
+        constraints["min"] = start
+    if stop is not None:
+        constraints["max"] = stop
+    step = getattr(element, "step", None)
+    if step is not None:
+        constraints["step"] = step
+
+    # dropdown / multiselect expose ``options`` as a ``dict[label, value]``.
+    # The wire protocol selects by *label*, so surface the keys.
+    options = getattr(element, "options", None)
+    if isinstance(options, dict):
+        constraints["options"] = list(options.keys())
+    elif options is not None:
+        try:
+            constraints["options"] = list(options)
+        except TypeError:
+            pass
+
+    return constraints
+
+
 @_dataclass(frozen=True)
 class _InputMetadata:
     """Metadata attached to a `mo.api.input(...)` UI element.
@@ -119,7 +156,6 @@ def input(  # noqa: A001 - matches public name `mo.api.input`
     label_str = label if label is not None else (description or "")
 
     element: UIElement[Any, Any]
-    constraints: dict[str, Any] = {}
 
     if ui is not None:
         element = ui
@@ -129,7 +165,6 @@ def input(  # noqa: A001 - matches public name `mo.api.input`
             value=default if default is not None else None,
             label=label_str,
         )
-        constraints["options"] = list(options)
     elif isinstance(default, bool):
         element = mo_ui.switch(value=default, label=label_str)
     elif min is not None and max is not None:
@@ -141,10 +176,6 @@ def input(  # noqa: A001 - matches public name `mo.api.input`
             label=label_str,
             show_value=True,
         )
-        constraints["min"] = min
-        constraints["max"] = max
-        if step is not None:
-            constraints["step"] = step
     elif (
         min is not None or max is not None or isinstance(default, (int, float))
     ):
@@ -155,19 +186,18 @@ def input(  # noqa: A001 - matches public name `mo.api.input`
             value=default,
             label=label_str,
         )
-        if min is not None:
-            constraints["min"] = min
-        if max is not None:
-            constraints["max"] = max
     elif multiline:
         element = mo_ui.text_area(value=default or "", label=label_str)
     else:
         element = mo_ui.text(value=default or "", label=label_str)
 
+    # Always introspect constraints from the element itself so the schema
+    # reflects bounds attached to user-supplied ``ui=`` widgets too, not just
+    # those inferred from the ``min``/``max``/``options`` kwargs.
     metadata = _InputMetadata(
         description=description,
         kind_hint=None,
-        constraints=constraints,
+        constraints=_introspect_constraints(element),
     )
     setattr(element, DATAFLOW_INPUT_MARKER, metadata)
     return element
