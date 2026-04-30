@@ -243,13 +243,27 @@ Returns JSON `DataflowSchema`:
     }
   ],
   "outputs": [{ "name": "stats", "kind": "any" }],
-  "schemaId": "f3a1c2d8e4b9..."
+  "schemaId": "f3a1c2d8e4b9...",
+  "graph": {
+    "threshold": [],
+    "filtered": ["threshold"],
+    "stats": ["filtered"]
+  }
 }
 ```
 
 `schemaId` is a content hash. Cache it client-side and compare on each
 response — when the notebook structure changes (cells added, signatures
 shift), `schemaId` changes and the client knows to refetch.
+
+`graph` is a variable-level dependency map: each key is a variable name
+in `inputs ∪ outputs` and each value is the sorted list of variables (also
+in that universe) read by the cell that defines the key. Inputs always
+map to `[]`. Use it to render hover popovers that show what produced a
+value, or to compute a focused subscription set for "show me only this
+subgraph" runs — the vendored client exports pure helpers (`getDirectDeps`,
+`getAncestors`, `getDescendants`, `getSubgraph`) and a `useDataflowGraph()`
+hook for this.
 
 ### `POST /api/v1/dataflow/run`
 

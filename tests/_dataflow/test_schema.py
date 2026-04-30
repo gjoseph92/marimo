@@ -208,3 +208,57 @@ class TestKernelDerivedSchema:
         )
         [stats_out] = [o for o in schema.outputs if o.name == "stats"]
         assert stats_out.description == "Top-line stats"
+
+    def test_graph_captures_intra_universe_edges_only(self) -> None:
+        """``schema.graph`` is closed under inputs ∪ outputs.
+
+        Builtins (``len``), modules (``mo``), and typing helpers must not
+        appear as edges; inputs always map to ``[]`` because no other
+        variable in the universe defines them.
+        """
+        import marimo as mo
+
+        app = marimo.App()
+
+        @app.cell
+        def _():
+            threshold = mo.api.input(min=0, max=100, default=20)
+            return (threshold,)
+
+        @app.cell
+        def _(threshold):
+            data = list(range(100))
+            filtered = [x for x in data if x > threshold]
+            return data, filtered
+
+        @app.cell
+        def _(filtered):
+            stats = {"count": len(filtered)}
+            return (stats,)
+
+        threshold = mo.api.input(min=0, max=100, default=20)
+        schema = compute_dataflow_schema_from_globals(
+            graph=InternalApp(app).graph,
+            globals_={
+                "mo": mo,  # module — must not appear in graph
+                "threshold": threshold,
+                "data": list(range(100)),
+                "filtered": [],
+                "stats": {"count": 0},
+            },
+        )
+        # ``data``/``filtered`` are co-defined; the cell reads ``threshold``.
+        assert schema.graph["data"] == ["threshold"]
+        assert schema.graph["filtered"] == ["threshold"]
+        assert schema.graph["stats"] == ["filtered"]
+        assert schema.graph["threshold"] == []  # input — no producers
+        # Every edge endpoint is a node in the schema's universe.
+        universe = {i.name for i in schema.inputs} | {
+            o.name for o in schema.outputs
+        }
+        for src, dsts in schema.graph.items():
+            assert src in universe
+            for dst in dsts:
+                assert dst in universe, (src, dst)
+        assert "mo" not in schema.graph  # filtered out as a module
+        assert "len" not in schema.graph  # builtin, never enters the universe

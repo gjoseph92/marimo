@@ -16,7 +16,7 @@ export default defineConfig({
     },
     proxy: {
       "/api": {
-        target: "http://localhost:2718",
+        target: process.env.MARIMO_PROXY_URL ?? "http://localhost:2718",
         changeOrigin: true,
       },
     },

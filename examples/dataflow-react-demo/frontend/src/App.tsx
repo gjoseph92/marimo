@@ -1,7 +1,10 @@
 import { useMemo, useState } from "react";
 import {
   DataflowProvider,
+  getAncestors,
+  getDirectDeps,
   type InputSchema,
+  useDataflowGraph,
   useDataflowInput,
   useDataflowSchema,
   useDataflowStatus,
@@ -63,6 +66,7 @@ function Page({
         <Table />
       </div>
 
+      <DepsExplorer />
       <DebugFooter />
       <SchemaFooter />
     </div>
@@ -361,6 +365,106 @@ function SchemaFooter() {
   );
 }
 
+function DepsExplorer() {
+  // "Hover-debug" panel: pick a variable, see what produced it. The
+  // ancestor closure is computed entirely client-side from
+  // ``schema.graph`` — no extra round-trip — and mounting
+  // ``useDataflowValue`` for the selection means clicking an unrendered
+  // variable adds it to the server-side subscription set so its value
+  // streams in on the next run.
+  const schema = useDataflowSchema();
+  const graph = useDataflowGraph();
+  const [selected, setSelected] = useState<string | null>(null);
+
+  const allVars = useMemo(() => {
+    if (!schema) return [];
+    return [
+      ...schema.inputs.map((i) => i.name),
+      ...schema.outputs.map((o) => o.name),
+    ];
+  }, [schema]);
+
+  const inspectedValue = useDataflowValue<unknown>(selected ?? "");
+  const ancestorSet = useMemo(
+    () => (selected ? getAncestors(graph, selected) : new Set<string>()),
+    [graph, selected],
+  );
+  const directDeps = useMemo(
+    () => (selected ? getDirectDeps(graph, selected) : []),
+    [graph, selected],
+  );
+
+  if (!schema) return null;
+
+  return (
+    <footer style={styles.footer}>
+      <details>
+        <summary style={styles.detailsSummary}>
+          Dependency explorer ({allVars.length} variables)
+        </summary>
+        <p style={styles.meta}>
+          Click any variable to highlight its full ancestor closure
+          (computed client-side from <code>schema.graph</code>). The
+          selection auto-subscribes via <code>useDataflowValue</code>, so
+          clicking an unrendered variable streams its value here on the
+          next run.
+        </p>
+        <div style={styles.chipRow}>
+          {allVars.map((name) => {
+            const isSelected = name === selected;
+            const isAncestor = ancestorSet.has(name);
+            return (
+              <button
+                key={name}
+                type="button"
+                onClick={() =>
+                  setSelected((cur) => (cur === name ? null : name))
+                }
+                style={{
+                  ...styles.chip,
+                  ...(isSelected ? styles.chipSelected : {}),
+                  ...(isAncestor ? styles.chipAncestor : {}),
+                }}
+                title={
+                  selected
+                    ? isSelected
+                      ? "selected (click again to clear)"
+                      : isAncestor
+                        ? `ancestor of ${selected}`
+                        : "not in subgraph"
+                    : "click to inspect"
+                }
+              >
+                {name}
+              </button>
+            );
+          })}
+        </div>
+        {selected && (
+          <div style={styles.depsDetail}>
+            <div>
+              <strong>{selected}</strong> directly depends on:{" "}
+              {directDeps.length === 0 ? (
+                <em>none (input or constant)</em>
+              ) : (
+                directDeps.map((d) => <code key={d} style={styles.codeChip}>{d}</code>)
+              )}
+            </div>
+            <div style={styles.depsValue}>
+              <span style={styles.meta}>current value:</span>
+              <pre style={styles.preInline}>
+                {inspectedValue === undefined
+                  ? "(pending — request a run)"
+                  : truncate(JSON.stringify(inspectedValue, null, 2), 600)}
+              </pre>
+            </div>
+          </div>
+        )}
+      </details>
+    </footer>
+  );
+}
+
 function DebugFooter() {
   // Reads the catch-all snapshot, so this re-renders on every var update.
   // That's deliberate for a debug view; production components should reach
@@ -566,5 +670,54 @@ const styles: Record<string, React.CSSProperties> = {
     borderCollapse: "collapse",
     fontSize: "0.85rem",
     marginTop: "0.75rem",
+  },
+  chipRow: {
+    display: "flex",
+    flexWrap: "wrap",
+    gap: "0.4rem",
+    marginTop: "0.75rem",
+  },
+  chip: {
+    padding: "0.25rem 0.6rem",
+    borderRadius: 999,
+    border: "1px solid #dee2e6",
+    background: "#fff",
+    color: "#495057",
+    fontFamily: "ui-monospace, SFMono-Regular, monospace",
+    fontSize: "0.78rem",
+    cursor: "pointer",
+  },
+  chipAncestor: {
+    background: "#e7f5ff",
+    borderColor: "#74c0fc",
+    color: "#1864ab",
+  },
+  chipSelected: {
+    background: "#4361ee",
+    borderColor: "#4361ee",
+    color: "#fff",
+    fontWeight: 600,
+  },
+  codeChip: {
+    display: "inline-block",
+    padding: "0 0.35rem",
+    margin: "0 0.2rem",
+    background: "#e9ecef",
+    borderRadius: 4,
+    fontSize: "0.78rem",
+  },
+  depsDetail: {
+    marginTop: "0.75rem",
+    padding: "0.75rem",
+    background: "#f8f9fa",
+    borderRadius: 6,
+    border: "1px solid #e9ecef",
+    fontSize: "0.85rem",
+  },
+  depsValue: {
+    marginTop: "0.5rem",
+    display: "flex",
+    alignItems: "flex-start",
+    gap: "0.5rem",
   },
 };

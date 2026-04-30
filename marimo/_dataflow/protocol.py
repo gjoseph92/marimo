@@ -83,11 +83,20 @@ class DataflowSchema(msgspec.Struct, rename="camel"):
     ``"run_button"`` paired with cells that read those buttons and gate
     on ``mo.stop(not button.value)``. See the dataflow API guide for the
     canonical pattern.
+
+    ``graph`` is a variable-level dependency map: each key is the name of
+    a variable in ``inputs`` or ``outputs``, and each value is the sorted
+    list of variables (also in ``inputs`` or ``outputs``) that the cell
+    defining the key reads. Inputs always map to ``[]``. Clients can use
+    it to compute ancestors/descendants for debug popovers, fire focused
+    ``/run`` requests, or render a mini-DAG; the server doesn't need any
+    extra endpoints.
     """
 
     inputs: list[InputSchema]
     outputs: list[OutputSchema]
     schema_id: str
+    graph: dict[str, list[str]] = msgspec.field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
