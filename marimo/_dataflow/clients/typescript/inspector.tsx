@@ -538,9 +538,10 @@ function clamp(v: number, lo: number, hi: number): number {
 //   - Same column ⇒ "chain" edge: a single vertical segment from the
 //     parent's bottom to the child's top.
 //   - Different column, child has multiple parents ⇒ "fan-in": exit
-//     the parent's right side, run horizontally to the child's center
-//     x, drop straight down into the child's top. All parents of the
-//     same child therefore merge into one vertical drop into the top.
+//     the parent's right side, run horizontally a few px past the
+//     child's left edge, drop straight down into the child's top.
+//     All parents of the same child reuse this x, so they visually
+//     converge into one drop into the child's top.
 //   - Different column, child has a single parent (so this *is* a
 //     fan-out from the parent) ⇒ "fan-out": exit the parent's right
 //     side, run to a merge column just left of the child, drop to the
@@ -558,6 +559,10 @@ const ROW_GAP = 4;
 const LEVEL_GAP = 18;
 const COL_GAP = 5;
 const MERGE_GAP = 3;
+// Fan-in edges drop into the child's top this many pixels past its
+// left edge, so the merge column hugs the parents' right side instead
+// of running all the way to the child's center.
+const FANIN_INSET = 4;
 const PADDING_X = 12;
 const PADDING_Y = 12;
 const MIN_NODE_WIDTH = 64;
@@ -836,10 +841,13 @@ function MiniDag({
           if (style === "chain") {
             d = `M ${aCenterX} ${aBottom} V ${bTop}`;
           } else if (style === "fanin") {
-            // Multi-parent merge into the child's top. All parents of
-            // the same child reuse this x, so they visually converge
-            // into one drop.
-            d = `M ${aRight} ${aCenterY} H ${bCenterX} V ${bTop}`;
+            // Multi-parent merge into the child's top, close to its
+            // left edge instead of its center. Keeps the horizontal
+            // run short (a few px past the widest parent) while still
+            // entering through the top. All parents of the same child
+            // share this x, so they visually converge into one drop.
+            const mx = bLeft + Math.min(b.width / 2, FANIN_INSET);
+            d = `M ${aRight} ${aCenterY} H ${mx} V ${bTop}`;
           } else {
             // Fan-out: one parent, multiple children. Enter the
             // child's left side via a merge column just to its left.
