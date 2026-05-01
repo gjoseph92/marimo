@@ -1297,6 +1297,7 @@ const styles: Record<string, CSSProperties> = {
   pinBtn: {
     border: "1px solid #dee2e6",
     background: "#fff",
+    color: "#212529",
     borderRadius: 4,
     padding: "2px 8px",
     fontSize: 11,
