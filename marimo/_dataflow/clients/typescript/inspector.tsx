@@ -525,9 +525,14 @@ function clamp(v: number, lo: number, hi: number): number {
 // ---------------------------------------------------------------------------
 
 const NODE_HEIGHT = 24;
-const ROW_GAP = 8;
-const COL_GAP = 36;
-const MERGE_GAP = 14;
+// Sibling vs. level gap: tighter spacing for nodes at the same depth
+// (visually a sibling group), wider for nodes at different depths
+// (visually a downstream step). Without the difference, chained
+// nodes look like siblings.
+const ROW_GAP = 4;
+const LEVEL_GAP = 18;
+const COL_GAP = 14;
+const MERGE_GAP = 8;
 const PADDING_X = 12;
 const PADDING_Y = 12;
 const MIN_NODE_WIDTH = 64;
@@ -596,6 +601,26 @@ function layoutDag(nodes: readonly string[], graph: VariableGraph): DagLayout {
     return v;
   }
   for (const n of nodes) computeColumn(n);
+
+  // True depth (longest path from a source) — chain edges *do*
+  // increment this. Used purely to widen the vertical gap between
+  // adjacent rows whose depths differ, so chained children visually
+  // sit below their parent rather than alongside siblings.
+  const depth = new Map<string, number>();
+  const visitingD = new Set<string>();
+  function computeDepth(name: string): number {
+    const cached = depth.get(name);
+    if (cached !== undefined) return cached;
+    if (visitingD.has(name)) return 0;
+    visitingD.add(name);
+    const parents = parentsOf.get(name)!;
+    const v =
+      parents.length === 0 ? 0 : 1 + Math.max(...parents.map(computeDepth));
+    visitingD.delete(name);
+    depth.set(name, v);
+    return v;
+  }
+  for (const n of nodes) computeDepth(n);
 
   const colNodes = new Map<number, string[]>();
   for (const n of nodes) {
@@ -672,6 +697,22 @@ function layoutDag(nodes: readonly string[], graph: VariableGraph): DagLayout {
     cx += colWidth[i] + COL_GAP;
   }
 
+  // Depth-aware row Y positions: small gap when adjacent rows are at
+  // the same depth (sibling group), wider gap when they differ
+  // (downstream step). Built once for all rows and indexed by row.
+  const nodeAtRow: string[] = new Array(nextRow);
+  for (const [n, r] of row) nodeAtRow[r] = n;
+  const rowY: number[] = [];
+  let cy = PADDING_Y;
+  for (let r = 0; r < nextRow; r++) {
+    if (r > 0) {
+      const sameLevel =
+        depth.get(nodeAtRow[r]) === depth.get(nodeAtRow[r - 1]);
+      cy += NODE_HEIGHT + (sameLevel ? ROW_GAP : LEVEL_GAP);
+    }
+    rowY.push(cy);
+  }
+
   const positions = new Map<string, NodePos>();
   for (const n of nodes) {
     const c = column.get(n)!;
@@ -681,7 +722,7 @@ function layoutDag(nodes: readonly string[], graph: VariableGraph): DagLayout {
     const center = colX[ci] + colWidth[ci] / 2;
     positions.set(n, {
       x: center - w / 2,
-      y: PADDING_Y + r * (NODE_HEIGHT + ROW_GAP),
+      y: rowY[r],
       width: w,
       column: ci,
     });
@@ -709,9 +750,9 @@ function layoutDag(nodes: readonly string[], graph: VariableGraph): DagLayout {
         colWidth[sortedCols.length - 1] +
         PADDING_X;
   const totalHeight =
-    PADDING_Y * 2 +
-    nextRow * NODE_HEIGHT +
-    Math.max(0, nextRow - 1) * ROW_GAP;
+    nextRow === 0
+      ? PADDING_Y * 2
+      : rowY[nextRow - 1] + NODE_HEIGHT + PADDING_Y;
 
   return { positions, edges, width: totalWidth, height: totalHeight };
 }
