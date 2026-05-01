@@ -38,13 +38,11 @@ def infer_kind(value: Any) -> Kind:
     if isinstance(value, tuple):
         return Kind.TUPLE
 
+    if _is_table_like(value):
+        return Kind.TABLE
+
     type_name = type(value).__name__
     module = type(value).__module__
-
-    if type_name == "DataFrame" or module.startswith(
-        ("pandas", "polars", "pyarrow")
-    ):
-        return Kind.TABLE
     if type_name == "ndarray" and module.startswith("numpy"):
         return Kind.TENSOR
 
@@ -52,6 +50,36 @@ def infer_kind(value: Any) -> Kind:
 
 
 _TABLE_SAMPLE_SIZE = 16
+
+# Row cap for table-shaped values serialized as JSON. The JSON channel
+# is the streaming preview path — sending more rows than the client
+# can display just wastes wire bytes and forces the producer to
+# materialize the full table on every update. Use the ``arrow_ipc``
+# encoding instead when you need the full payload.
+JSON_TABLE_ROW_LIMIT = 100
+
+
+def _is_table_like(value: Any) -> bool:
+    """True for DataFrame-style objects from common Python data libraries.
+
+    Restricted to the canonical "rectangular table" types of each
+    library — sibling types like ``polars.Series`` or
+    ``pandas.Index`` aren't tables and shouldn't be coerced into the
+    TABLE renderer.
+    """
+    type_name = type(value).__name__
+    module = type(value).__module__
+    if module.startswith("pandas") and type_name == "DataFrame":
+        return True
+    if module.startswith("polars") and type_name in ("DataFrame", "LazyFrame"):
+        return True
+    if module.startswith("pyarrow") and type_name in ("Table", "RecordBatch"):
+        return True
+    # DuckDB's relation type lives in the C extension module ``_duckdb``,
+    # so checking the (very distinctive) class name alone is enough.
+    if type_name == "DuckDBPyRelation":
+        return True
+    return False
 
 
 def serialize_value(
@@ -86,21 +114,34 @@ def _to_json(value: Any) -> Any:
     if isinstance(value, dict):
         return {str(k): _to_json(v) for k, v in value.items()}
 
-    # DataFrame-like objects
     type_name = type(value).__name__
     module = type(value).__module__
 
-    if type_name == "DataFrame":
-        if module.startswith("pandas"):
-            return value.to_dict(orient="records")
-        if module.startswith("polars"):
-            return value.to_dicts()
+    # All table-shaped values get capped at JSON_TABLE_ROW_LIMIT — the
+    # JSON channel is the preview path and full materialization on
+    # every update is the surprise we explicitly don't want here.
+    n = JSON_TABLE_ROW_LIMIT
+    if module.startswith("pandas") and type_name == "DataFrame":
+        return value.head(n).to_dict(orient="records")
+    if module.startswith("polars") and type_name == "DataFrame":
+        return value.head(n).to_dicts()
+    if module.startswith("polars") and type_name == "LazyFrame":
+        # ``head`` on a LazyFrame is a query rewrite, so the limit
+        # pushes down — we never collect the full plan.
+        return value.head(n).collect().to_dicts()
+    if module.startswith("pyarrow") and type_name in ("Table", "RecordBatch"):
+        # ``slice`` on Arrow is zero-copy and bounded by ``n``.
+        return value.slice(0, n).to_pylist()
+    if type_name == "DuckDBPyRelation":
+        # ``limit`` is a relational rewrite; the engine never produces
+        # the rows past ``n``. Pair each row tuple with the column
+        # names so the client gets the JSON-records shape it expects.
+        limited = value.limit(n)
+        return [dict(zip(limited.columns, row)) for row in limited.fetchall()]
 
-    # numpy
     if type_name == "ndarray" and module.startswith("numpy"):
         return value.tolist()
 
-    # Fallback: repr
     try:
         return repr(value)
     except Exception:
@@ -119,16 +160,23 @@ def _to_arrow_ipc_ref(value: Any) -> str:
     module = type(value).__module__
 
     table: pa.Table
-    if type_name == "DataFrame" and module.startswith("pandas"):
+    if module.startswith("pandas") and type_name == "DataFrame":
         table = pa.Table.from_pandas(value)
-    elif type_name == "DataFrame" and module.startswith("polars"):
+    elif module.startswith("polars") and type_name == "DataFrame":
         table = value.to_arrow()
+    elif module.startswith("polars") and type_name == "LazyFrame":
+        table = value.collect().to_arrow()
+    elif module.startswith("pyarrow") and type_name == "RecordBatch":
+        table = pa.Table.from_batches([value])
+    elif type_name == "DuckDBPyRelation":
+        table = value.to_arrow_table()
     elif isinstance(value, pa.Table):
         table = value
     else:
         raise TypeError(
-            f"Cannot serialize {type_name} as Arrow IPC. "
-            "Expected a pandas/polars DataFrame or pyarrow Table."
+            f"Cannot serialize {type_name} as Arrow IPC. Expected a "
+            "DataFrame (pandas/polars), pyarrow Table/RecordBatch, or "
+            "DuckDBPyRelation."
         )
 
     sink = pa.BufferOutputStream()
