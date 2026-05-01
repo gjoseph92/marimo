@@ -563,6 +563,8 @@ const MERGE_GAP = 3;
 // left edge, so the merge column hugs the parents' right side instead
 // of running all the way to the child's center.
 const FANIN_INSET = 4;
+// Radius for rounded corners where edge segments turn.
+const CORNER_RADIUS = 3;
 const PADDING_X = 12;
 const PADDING_Y = 12;
 const MIN_NODE_WIDTH = 64;
@@ -847,12 +849,28 @@ function MiniDag({
             // entering through the top. All parents of the same child
             // share this x, so they visually converge into one drop.
             const mx = bLeft + Math.min(b.width / 2, FANIN_INSET);
-            d = `M ${aRight} ${aCenterY} H ${mx} V ${bTop}`;
+            const r = Math.max(0, Math.min(CORNER_RADIUS, mx - aRight, bTop - aCenterY));
+            d =
+              r > 0.5
+                ? `M ${aRight} ${aCenterY} H ${mx - r} Q ${mx} ${aCenterY} ${mx} ${aCenterY + r} V ${bTop}`
+                : `M ${aRight} ${aCenterY} H ${mx} V ${bTop}`;
           } else {
             // Fan-out: one parent, multiple children. Enter the
             // child's left side via a merge column just to its left.
             const mx = Math.max(aRight + 2, bLeft - MERGE_GAP);
-            d = `M ${aRight} ${aCenterY} H ${mx} V ${bCenterY} H ${bLeft}`;
+            const r = Math.max(
+              0,
+              Math.min(
+                CORNER_RADIUS,
+                mx - aRight,
+                (bCenterY - aCenterY) / 2,
+                bLeft - mx,
+              ),
+            );
+            d =
+              r > 0.5
+                ? `M ${aRight} ${aCenterY} H ${mx - r} Q ${mx} ${aCenterY} ${mx} ${aCenterY + r} V ${bCenterY - r} Q ${mx} ${bCenterY} ${mx + r} ${bCenterY} H ${bLeft}`
+                : `M ${aRight} ${aCenterY} H ${mx} V ${bCenterY} H ${bLeft}`;
           }
           const incident = incidentEdges.has(`${from}→${to}`);
           return (
