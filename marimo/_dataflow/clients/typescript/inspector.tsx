@@ -13,14 +13,14 @@
 //
 // Interaction model:
 //   - Hover an inspectable region → popover shows for that region.
-//   - Click an inspectable region → pin it (popover stays even after
-//     the cursor leaves).
-//   - Click anywhere outside the popover → just *unpin*. After that,
-//     hover state takes over: if the cursor is over another
-//     inspectable, the popover shows it; if the cursor isn't over
-//     anything, the popover fades.
-//   - The "unpin" button in the popover header is an explicit
-//     dismissal that clears everything.
+//   - Click an inspectable region → pin it. Once pinned, the popover
+//     stays put and the inspector stops reacting to hovers/clicks
+//     until you explicitly unpin. This lets you interact with the
+//     surrounding UI (move sliders, click buttons, edit inputs)
+//     while keeping the inspector locked to the same region.
+//   - The "Unpin" button in the popover header is the only way to
+//     unpin; it clears the pin and hides the popover until you hover
+//     something again.
 //
 // React doesn't expose which fiber called a hook from inside the hook,
 // so truly automatic tracking would need unstable internals. Instead,
@@ -249,12 +249,11 @@ function InspectorOverlay({
       const region = id ? regionsRef.current.get(id) ?? null : null;
       if (region) {
         cancelClear();
-        // Always update hover, even when pinned, so unpinning later
-        // immediately reflects whatever the cursor is currently over.
-        // The popover display is governed by ``pinned ?? hover``, so
-        // pinned still wins for what's shown.
         setState((prev) =>
-          prev.hoverRegion?.id === region.id
+          // While pinned, ignore hover changes — the user is
+          // interacting with the surrounding UI and the inspector
+          // should stay locked to the pinned region.
+          prev.pinnedRegion || prev.hoverRegion?.id === region.id
             ? prev
             : { ...prev, hoverRegion: region },
         );
@@ -273,10 +272,12 @@ function InspectorOverlay({
       if (clearTimerRef.current === null) {
         clearTimerRef.current = window.setTimeout(() => {
           clearTimerRef.current = null;
-          // Clear hover regardless of pin so the moment the user
-          // unpins, the popover correctly hides if the cursor isn't
-          // over anything inspectable.
-          setState((prev) => ({ ...prev, hoverRegion: null }));
+          setState((prev) =>
+            // Don't disturb the pinned region; pinned wins for
+            // display, and we want to leave hover untouched so
+            // unpinning later doesn't flash a stale region.
+            prev.pinnedRegion ? prev : { ...prev, hoverRegion: null },
+          );
         }, 100);
       }
     };
@@ -284,20 +285,18 @@ function InspectorOverlay({
     const onClick = (e: MouseEvent) => {
       const target = e.target as HTMLElement | null;
       if (!target) return;
-      // Clicks inside the popover are owned by its internal handlers.
+      // Clicks inside the popover are owned by its internal handlers
+      // (e.g. the Unpin button, DAG node selection).
       if (popoverRef.current?.contains(target)) return;
 
       setState((prev) => {
-        // While pinned, *any* outside click just unpins. Hover takes
-        // over: if the cursor happens to be over another inspectable,
-        // the popover transitions to that one; if it isn't, the
-        // popover fades. This matches the user's mental model of
-        // "click outside = unpin, not dismiss".
-        if (prev.pinnedRegion) {
-          return { ...prev, pinnedRegion: null };
-        }
-        // Not pinned: clicking an inspectable pins it. Anything else
-        // is a no-op (hover state already governs visibility).
+        // While pinned, the inspector ignores outside clicks so the
+        // user can freely interact with surrounding UI (sliders,
+        // buttons, dropdowns) without losing context. The only way
+        // to unpin is the Unpin button in the popover header.
+        if (prev.pinnedRegion) return prev;
+        // Not pinned: clicking an inspectable pins it. Clicks on
+        // non-inspectable elements are a no-op.
         const inspectEl = target.closest<HTMLElement>("[data-inspect-id]");
         if (!inspectEl) return prev;
         const id = inspectEl.getAttribute("data-inspect-id");

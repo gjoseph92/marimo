@@ -464,14 +464,12 @@ the cursor), so hover stays cheap and the panel doesn't dart around
 while you reach for it. Interaction:
 
 - **Hover** an inspectable region → popover shows for that region.
-- **Click** an inspectable region → pin it (popover stays even after
-  the cursor leaves).
-- **Click anywhere outside the popover** → just *unpin*. Hover state
-  takes over: if the cursor is over another inspectable, the popover
-  transitions to it; if it isn't, the popover fades. Switching pins
-  is therefore "click outside (unpins) → click new region (pins)".
-- The **Unpin** button in the popover header is an explicit dismissal
-  that hides the popover entirely.
+- **Click** an inspectable region → pin it. Once pinned, the inspector
+  stops reacting to hovers and outside clicks, so you can freely move
+  sliders, click buttons, and edit inputs while keeping the inspector
+  locked to the same region.
+- The **Unpin** button in the popover header is the only way to unpin;
+  it hides the popover until you hover something again.
 
 Inside the popover:
 
