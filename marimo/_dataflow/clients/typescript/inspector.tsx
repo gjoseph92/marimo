@@ -556,8 +556,8 @@ const NODE_HEIGHT = 24;
 // nodes look like siblings.
 const ROW_GAP = 4;
 const LEVEL_GAP = 18;
-const COL_GAP = 14;
-const MERGE_GAP = 8;
+const COL_GAP = 5;
+const MERGE_GAP = 3;
 const PADDING_X = 12;
 const PADDING_Y = 12;
 const MIN_NODE_WIDTH = 64;
