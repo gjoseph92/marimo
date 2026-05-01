@@ -411,6 +411,14 @@ function OverlayPopover({
   const defaultVar = region.vars[0] ?? null;
   const visibleVar = pinnedVar ?? hoveredVar ?? defaultVar;
 
+  // Draggable split between the DAG panel and the preview panel.
+  // Initial width matches the previous fixed `flex: 0 0 256px` value.
+  // Width state is local to the popover so it persists across region
+  // changes (the popover stays mounted across hovers) but resets on
+  // unmount, which is the right scope for a transient debug overlay.
+  const bodyRef = useRef<HTMLDivElement | null>(null);
+  const [dagWidth, setDagWidth] = useState(DAG_PANEL_DEFAULT_WIDTH);
+
   return (
     <div ref={popoverRef} style={popoverStyle} data-dataflow-inspector-popover="">
       <header style={styles.header}>
@@ -434,8 +442,8 @@ function OverlayPopover({
         </button>
       </header>
 
-      <div style={styles.body}>
-        <section style={styles.dagPanel}>
+      <div ref={bodyRef} style={styles.body}>
+        <section style={{ ...styles.dagPanel, flex: `0 0 ${dagWidth}px` }}>
           <MiniDag
             nodes={nodes}
             graph={graph}
@@ -447,6 +455,7 @@ function OverlayPopover({
             }
           />
         </section>
+        <SplitDragHandle bodyRef={bodyRef} setDagWidth={setDagWidth} />
         <section style={styles.previewPanel}>
           {visibleVar ? (
             <PreviewPanelWithSubscription
@@ -468,6 +477,57 @@ function OverlayPopover({
         </section>
       </div>
     </div>
+  );
+}
+
+// Min/max widths for the DAG panel split, chosen so the preview side
+// always retains enough room to show a meaningful preview and the DAG
+// side keeps room for at least the widest node label.
+const DAG_PANEL_DEFAULT_WIDTH = 256;
+const DAG_PANEL_MIN_WIDTH = 120;
+const DAG_PANEL_MAX_WIDTH = POPOVER_WIDTH - 200;
+
+interface SplitDragHandleProps {
+  bodyRef: React.MutableRefObject<HTMLDivElement | null>;
+  setDagWidth: (px: number) => void;
+}
+
+function SplitDragHandle({ bodyRef, setDagWidth }: SplitDragHandleProps) {
+  const onPointerDown = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      const body = bodyRef.current;
+      if (!body) return;
+      e.preventDefault();
+      const target = e.currentTarget;
+      target.setPointerCapture(e.pointerId);
+      const bodyLeft = body.getBoundingClientRect().left;
+      const onMove = (ev: PointerEvent) => {
+        const next = clamp(
+          ev.clientX - bodyLeft,
+          DAG_PANEL_MIN_WIDTH,
+          DAG_PANEL_MAX_WIDTH,
+        );
+        setDagWidth(next);
+      };
+      const onUp = (ev: PointerEvent) => {
+        target.releasePointerCapture(ev.pointerId);
+        target.removeEventListener("pointermove", onMove);
+        target.removeEventListener("pointerup", onUp);
+        target.removeEventListener("pointercancel", onUp);
+      };
+      target.addEventListener("pointermove", onMove);
+      target.addEventListener("pointerup", onUp);
+      target.addEventListener("pointercancel", onUp);
+    },
+    [bodyRef, setDagWidth],
+  );
+  return (
+    <div
+      role="separator"
+      aria-orientation="vertical"
+      onPointerDown={onPointerDown}
+      style={styles.splitHandle}
+    />
   );
 }
 
@@ -1244,13 +1304,19 @@ const styles: Record<string, CSSProperties> = {
   },
   body: { display: "flex", flex: 1, minHeight: 0 },
   dagPanel: {
-    flex: "0 0 256px",
     overflow: "auto",
-    borderRight: "1px solid #e5e7eb",
     padding: 0,
+  },
+  splitHandle: {
+    flex: "0 0 5px",
+    cursor: "col-resize",
+    background: "#e5e7eb",
+    transition: "background 120ms",
+    touchAction: "none",
   },
   previewPanel: {
     flex: 1,
+    minWidth: 0,
     overflow: "auto",
     padding: "10px 12px",
   },
