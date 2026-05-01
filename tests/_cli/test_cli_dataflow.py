@@ -32,6 +32,7 @@ def _bundled(*parts: str) -> Path:
     ("subcommand", "needle"),
     [
         ("client", "DataflowProvider"),
+        ("inspector", "InspectorProvider"),
         ("skill", "Dataflow API — Agent Recipe"),
     ],
 )
@@ -45,16 +46,20 @@ def test_dataflow_dump_to_stdout(subcommand: str, needle: str) -> None:
 
 
 @pytest.mark.xfail(condition=is_windows(), reason="flaky on Windows")
-def test_client_path_returns_file() -> None:
-    """``client --path`` resolves to the dataflow.tsx file."""
+@pytest.mark.parametrize(
+    ("subcommand", "filename"),
+    [("client", "dataflow.tsx"), ("inspector", "inspector.tsx")],
+)
+def test_tsx_path_returns_file(subcommand: str, filename: str) -> None:
+    """``--path`` for vendored .tsx assets resolves to the bundled file."""
     p = subprocess.run(
-        ["marimo", "dataflow", "client", "--path"],
+        ["marimo", "dataflow", subcommand, "--path"],
         capture_output=True,
     )
     assert p.returncode == 0, p.stderr.decode()
     reported = Path(p.stdout.decode().strip())
     assert reported.is_file(), reported
-    expected = _bundled("_dataflow", "clients", "typescript", "dataflow.tsx")
+    expected = _bundled("_dataflow", "clients", "typescript", filename)
     assert reported.read_bytes() == expected.read_bytes()
     assert hashlib.sha256(expected.read_bytes()).hexdigest()
 

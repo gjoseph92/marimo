@@ -112,6 +112,12 @@ export interface RunStatus {
    */
   subscriptionsResolvedMs: number | null;
   schemaId: string | null;
+  /**
+   * ``Date.now()`` snapshot of when the current run started. Same time
+   * basis as ``VarUpdate.ts``, so subtracting gives the run-relative
+   * arrival time of any variable. ``null`` until the first run kicks off.
+   */
+  runStartedAtWall: number | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -142,6 +148,7 @@ export class DataflowClient {
     firstVarMs: null,
     subscriptionsResolvedMs: null,
     schemaId: null,
+    runStartedAtWall: null,
   };
   // Per-run timing bookkeeping. ``runStartedAt`` is captured client-side
   // right before the fetch so the elapsed numbers include network RTT,
@@ -428,6 +435,7 @@ export class DataflowClient {
       elapsedMs: null,
       firstVarMs: null,
       subscriptionsResolvedMs: null,
+      runStartedAtWall: Date.now(),
     });
 
     try {
@@ -640,6 +648,38 @@ function useClient(): DataflowClient {
   return c;
 }
 
+// ---------------------------------------------------------------------------
+// Inspector extension point
+//
+// This context is the seam between ``dataflow.tsx`` and the optional
+// ``inspector.tsx`` companion. When an ``<InspectorProvider>`` is mounted,
+// it puts a tracker in this context; whenever a dataflow hook runs inside
+// an ``<Inspect>`` region, the tracker records the variable name. That
+// auto-discovery is what lets the inspector surface "this component reads
+// X, Y, Z" without the user repeating themselves at every wrapper.
+//
+// When no inspector is mounted the context is ``null`` and ``track()`` is
+// never called — zero runtime cost for apps that don't opt in.
+// ---------------------------------------------------------------------------
+
+export interface InspectorTracker {
+  track: (name: string) => void;
+}
+
+export const InspectorTrackerContext =
+  createContext<InspectorTracker | null>(null);
+
+/**
+ * Internal hook called by every variable-bound dataflow hook. Registers
+ * ``name`` with the surrounding ``<Inspect>`` region (if any) so the
+ * inspector can show "this component reads X, Y, Z" without manual
+ * declarations. No-op when no inspector is mounted.
+ */
+function useInspectorTrack(name: string): void {
+  const tracker = useContext(InspectorTrackerContext);
+  if (tracker && name) tracker.track(name);
+}
+
 /** Returns the current schema, re-rendering only when it changes. */
 export function useDataflowSchema(): DataflowSchema | null {
   const client = useClient();
@@ -770,6 +810,7 @@ export function useDataflowVariable<T = unknown>(
   name: string,
 ): VarUpdate<T> | undefined {
   const client = useClient();
+  useInspectorTrack(name);
   useEffect(() => client.retain(name), [client, name]);
   return useSyncExternalStore(
     useCallback((cb) => client.subscribeVar(name, cb), [client, name]),
@@ -787,6 +828,7 @@ export function useDataflowInput<T = unknown>(
   fallback?: T,
 ): [T | undefined, (value: T) => void] {
   const client = useClient();
+  useInspectorTrack(name);
   const value = useSyncExternalStore(
     useCallback((cb) => client.subscribeInput(name, cb), [client, name]),
     () => client.getInput(name),

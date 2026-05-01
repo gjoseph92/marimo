@@ -13,21 +13,27 @@ import {
   useDataflowValuesSnapshot,
   type VarUpdate,
 } from "./dataflow";
+import { Inspect, InspectorProvider } from "./inspector";
 
 export function App() {
   // Drive autoRun from React state so the toggle in <Inputs/> reconfigures
   // the existing client (no remount, no lost subscriptions).
   const [autoRun, setAutoRun] = useState(true);
   const [showSlow, setShowSlow] = useState(true);
+  const [inspectMode, setInspectMode] = useState(true);
 
   return (
     <DataflowProvider baseUrl="/api/v1/dataflow" autoRun={autoRun}>
-      <Page
-        autoRun={autoRun}
-        onToggleAutoRun={setAutoRun}
-        showSlow={showSlow}
-        onToggleSlow={setShowSlow}
-      />
+      <InspectorProvider enabled={inspectMode}>
+        <Page
+          autoRun={autoRun}
+          onToggleAutoRun={setAutoRun}
+          showSlow={showSlow}
+          onToggleSlow={setShowSlow}
+          inspectMode={inspectMode}
+          onToggleInspect={setInspectMode}
+        />
+      </InspectorProvider>
     </DataflowProvider>
   );
 }
@@ -37,11 +43,15 @@ function Page({
   onToggleAutoRun,
   showSlow,
   onToggleSlow,
+  inspectMode,
+  onToggleInspect,
 }: {
   autoRun: boolean;
   onToggleAutoRun: (v: boolean) => void;
   showSlow: boolean;
   onToggleSlow: (v: boolean) => void;
+  inspectMode: boolean;
+  onToggleInspect: (v: boolean) => void;
 }) {
   return (
     <div style={styles.container}>
@@ -50,6 +60,14 @@ function Page({
         <p style={styles.subtitle}>
           Schema-driven inputs · per-variable subscriptions · streaming outputs
         </p>
+        <label style={{ ...styles.checkbox, justifyContent: "center" }}>
+          <input
+            type="checkbox"
+            checked={inspectMode}
+            onChange={(e) => onToggleInspect(e.target.checked)}
+          />
+          Inspect mode (hover any output card for a debug overlay)
+        </label>
       </header>
 
       <div style={styles.grid}>
@@ -59,11 +77,23 @@ function Page({
           showSlow={showSlow}
           onToggleSlow={onToggleSlow}
         />
-        <Stats />
-        <NotifResult />
-        {showSlow && <SlowThreshold />}
-        <Histogram />
-        <Table />
+        <Inspect label="Stats card">
+          <Stats />
+        </Inspect>
+        <Inspect label="Notif result">
+          <NotifResult />
+        </Inspect>
+        {showSlow && (
+          <Inspect label="Slow threshold">
+            <SlowThreshold />
+          </Inspect>
+        )}
+        <Inspect label="Histogram">
+          <Histogram />
+        </Inspect>
+        <Inspect label="Filtered table">
+          <Table />
+        </Inspect>
       </div>
 
       <DepsExplorer />

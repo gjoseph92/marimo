@@ -2,11 +2,14 @@
 """``marimo dataflow`` CLI subcommands.
 
 These commands surface assets that ship inside the marimo wheel — the
-TypeScript client and the agent skill — so any environment with
-``marimo`` installed can vendor them without a separate download:
+TypeScript client, the optional inspector overlay, and the agent skill —
+so any environment with ``marimo`` installed can vendor them without a
+separate download:
 
     marimo dataflow client        > src/dataflow.tsx
     marimo dataflow client --path             # filesystem path to dataflow.tsx
+    marimo dataflow inspector     > src/inspector.tsx
+    marimo dataflow inspector --path          # filesystem path to inspector.tsx
     marimo dataflow skill         > SKILL.md
     marimo dataflow skill  --path             # repo root for ``gh skill install``
 
@@ -30,6 +33,7 @@ from marimo._cli.help_formatter import ColoredCommand, ColoredGroup
 from marimo._utils.paths import marimo_package_path
 
 _CLIENT_PATH = ("_dataflow", "clients", "typescript", "dataflow.tsx")
+_INSPECTOR_PATH = ("_dataflow", "clients", "typescript", "inspector.tsx")
 # Root that satisfies the agent-skills ``<root>/skills/<name>/SKILL.md``
 # layout, so it composes with ``gh skill install --from-local <root> <name>``.
 _SKILL_ROOT_PATH = ("_dataflow",)
@@ -76,6 +80,31 @@ def client(show_path: bool) -> None:
         marimo dataflow client > src/dataflow.tsx
     """
     path = _resolve(*_CLIENT_PATH)
+    if show_path:
+        click.echo(path)
+        return
+    with open(path, encoding="utf-8") as f:
+        click.echo(f.read(), nl=False)
+
+
+@dataflow.command(cls=ColoredCommand)
+@click.option(
+    "--path",
+    "show_path",
+    is_flag=True,
+    help="Print the filesystem path of the bundled file instead of its contents.",
+)
+def inspector(show_path: bool) -> None:
+    """Print the optional dataflow Inspector overlay (``inspector.tsx``).
+
+    Companion to ``dataflow.tsx`` that adds a hover-to-debug overlay:
+    wrap any component in ``<Inspect>`` and the inspector renders a
+    pruned mini-DAG, per-variable timing, and a rich value preview when
+    you hover. Drop it in alongside the client:
+
+        marimo dataflow inspector > src/inspector.tsx
+    """
+    path = _resolve(*_INSPECTOR_PATH)
     if show_path:
         click.echo(path)
         return
