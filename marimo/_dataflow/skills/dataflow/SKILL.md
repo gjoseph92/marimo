@@ -473,10 +473,12 @@ while you reach for it. Interaction:
 
 Inside the popover:
 
-- A compact SVG mini-DAG of the variables the region reads plus their
-  full ancestor closure (sources at the top, sinks at the bottom).
-  Selecting a node bolds it and draws L-shaped connections to its
-  direct parents and children, fading unrelated nodes.
+- A compact SVG layered DAG of the variables the region reads plus
+  their full ancestor closure (sources at the top, sinks at the
+  bottom). The full graph structure is drawn at once — every edge is
+  always visible. Selecting a node only changes color emphasis
+  (selected pill highlighted, incident edges bolded, non-incident
+  edges faded), never the layout.
 - A rich preview pane that dispatches on the variable's `Kind` —
   tables render as HTML tables, dicts as a collapsible JSON tree,
   images as `<img>`, scalars inline.

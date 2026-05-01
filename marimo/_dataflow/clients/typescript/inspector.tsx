@@ -342,9 +342,8 @@ interface OverlayPopoverProps {
   popoverRef: React.MutableRefObject<HTMLDivElement | null>;
 }
 
-const POPOVER_WIDTH = 720;
-const POPOVER_HEIGHT = 420;
-const ROW_HEIGHT = 22;
+const POPOVER_WIDTH = 760;
+const POPOVER_HEIGHT = 440;
 
 function OverlayPopover({
   region,
@@ -374,11 +373,9 @@ function OverlayPopover({
     return nodes;
   }, [graph, region.vars]);
 
-  // Topologically ordered list — sources up top, sinks at the bottom.
-  const ordered = useMemo(
-    () => topologicalOrder(subgraphNodes, graph),
-    [subgraphNodes, graph],
-  );
+  // Stable node list (membership only — layout is computed inside
+  // ``MiniDag`` from the graph itself).
+  const nodes = useMemo(() => [...subgraphNodes], [subgraphNodes]);
 
   const inputNames = useMemo(
     () => new Set(schema?.inputs.map((i) => i.name) ?? []),
@@ -410,7 +407,7 @@ function OverlayPopover({
       <div style={styles.body}>
         <section style={styles.dagPanel}>
           <MiniDag
-            ordered={ordered}
+            nodes={nodes}
             graph={graph}
             inputNames={inputNames}
             selectedVar={visibleVar}
@@ -434,8 +431,8 @@ function OverlayPopover({
             />
           ) : (
             <p style={styles.placeholder}>
-              Hover any node in the subgraph to preview its value. Click to
-              pin.
+              Hover any node in the graph to preview its value. Click to
+              pin the preview.
             </p>
           )}
         </section>
@@ -496,24 +493,158 @@ function clamp(v: number, lo: number, hi: number): number {
 }
 
 // ---------------------------------------------------------------------------
-// Mini-DAG — marimo-minimap-style compact SVG visualization.
+// Mini-DAG — full layered top-down DAG, drawn all at once.
 //
-// The layout is a single column of fixed-height rows in topological
-// order. Each row has a small circle on the left and the variable name
-// to its right. Connection lines render as a single SVG layer behind
-// the rows: when a variable is selected we draw an L-shaped path from
-// its dot to each ancestor (going up-left) and each descendant (going
-// down-left), terminating at the target row. Ancestors of the selection
-// shift left by ``WHISKER`` so the path can dock cleanly against them;
-// descendants shift right.
+// Layout:
+//   - Each variable goes on a layer equal to its longest path from a
+//     source within the subgraph (Sugiyama y-coordinate). Sources are
+//     at the top, sinks at the bottom.
+//   - Within each layer, nodes are reordered by the barycenter of
+//     their parents in the previous layer to reduce edge crossings.
+//   - Nodes are SVG-positioned labeled rounded rectangles. Edges are
+//     soft cubic bezier curves between layers and are *always*
+//     visible — selecting a node only changes color/emphasis, not
+//     layout or which edges are drawn.
 // ---------------------------------------------------------------------------
 
-const MARGIN_X = 32; // left padding inside the dag panel
-const NAME_X = MARGIN_X + 22; // x at which the variable name starts
-const WHISKER = 10;
+const NODE_HEIGHT = 24;
+const LAYER_GAP = 28;
+const NODE_GAP = 12;
+const PADDING_X = 14;
+const PADDING_Y = 14;
+const MIN_NODE_WIDTH = 64;
+const MAX_NODE_WIDTH = 140;
+const FONT_PX = 12;
+
+interface NodePos {
+  x: number; // horizontal *center*
+  y: number; // vertical *center*
+  width: number;
+  layer: number;
+}
+
+interface DagLayout {
+  positions: Map<string, NodePos>;
+  edges: ReadonlyArray<{ from: string; to: string }>;
+  width: number;
+  height: number;
+}
+
+function layoutDag(nodes: readonly string[], graph: VariableGraph): DagLayout {
+  const set = new Set(nodes);
+
+  // Layer assignment: longest path from any source in the subgraph.
+  const layer = new Map<string, number>();
+  const visiting = new Set<string>();
+  function depth(name: string): number {
+    const c = layer.get(name);
+    if (c !== undefined) return c;
+    if (visiting.has(name)) return 0; // cycle-safe, treat as source
+    visiting.add(name);
+    const parents = getDirectDeps(graph, name).filter((p) => set.has(p));
+    const v = parents.length === 0 ? 0 : 1 + Math.max(...parents.map(depth));
+    visiting.delete(name);
+    layer.set(name, v);
+    return v;
+  }
+  for (const n of nodes) depth(n);
+
+  // Bucket by layer.
+  const layers: string[][] = [];
+  for (const [n, l] of layer) {
+    while (layers.length <= l) layers.push([]);
+    layers[l].push(n);
+  }
+
+  // Crossing reduction: barycenter from above. Two passes is plenty
+  // for small subdags and gives stable, visually clean orderings.
+  const ordOf = new Map<string, number>();
+  for (let pass = 0; pass < 2; pass++) {
+    for (let l = 0; l < layers.length; l++) {
+      const ly = layers[l];
+      if (l === 0) {
+        ly.sort((a, b) => a.localeCompare(b));
+      } else {
+        ly.sort((a, b) => {
+          const ma = barycenter(a, set, graph, ordOf);
+          const mb = barycenter(b, set, graph, ordOf);
+          return ma - mb || a.localeCompare(b);
+        });
+      }
+      ly.forEach((n, i) => ordOf.set(n, i));
+    }
+  }
+
+  // Pixel layout: every layer is laid out on the same uniform grid,
+  // sized to fit the widest layer. Node width is text-driven within
+  // bounds, so single-letter names don't get giant pills.
+  const widthFor = (name: string) =>
+    Math.max(
+      MIN_NODE_WIDTH,
+      Math.min(MAX_NODE_WIDTH, name.length * (FONT_PX * 0.62) + 22),
+    );
+  const cellWidth =
+    Math.max(
+      ...nodes.map(widthFor),
+      MIN_NODE_WIDTH,
+    ) + NODE_GAP;
+  const maxLayer = Math.max(1, ...layers.map((ly) => ly.length));
+  const gridWidth = cellWidth * maxLayer;
+
+  const positions = new Map<string, NodePos>();
+  for (let l = 0; l < layers.length; l++) {
+    const ly = layers[l];
+    const startX = PADDING_X + (gridWidth - ly.length * cellWidth) / 2;
+    ly.forEach((n, i) => {
+      positions.set(n, {
+        x: startX + i * cellWidth + cellWidth / 2,
+        y: PADDING_Y + l * (NODE_HEIGHT + LAYER_GAP) + NODE_HEIGHT / 2,
+        width: widthFor(n),
+        layer: l,
+      });
+    });
+  }
+
+  const edges: Array<{ from: string; to: string }> = [];
+  for (const n of nodes) {
+    for (const p of getDirectDeps(graph, n)) {
+      if (set.has(p)) edges.push({ from: p, to: n });
+    }
+  }
+
+  return {
+    positions,
+    edges,
+    width: gridWidth + PADDING_X * 2,
+    height:
+      PADDING_Y * 2 +
+      layers.length * NODE_HEIGHT +
+      Math.max(0, layers.length - 1) * LAYER_GAP,
+  };
+}
+
+function barycenter(
+  name: string,
+  set: Set<string>,
+  graph: VariableGraph,
+  ordOf: Map<string, number>,
+): number {
+  const parents = getDirectDeps(graph, name).filter((p) => set.has(p));
+  if (parents.length === 0) return 0;
+  let s = 0;
+  let n = 0;
+  for (const p of parents) {
+    const o = ordOf.get(p);
+    if (o !== undefined) {
+      s += o;
+      n++;
+    }
+  }
+  return n === 0 ? 0 : s / n;
+}
 
 interface MiniDagProps {
-  ordered: readonly string[];
+  nodes: readonly string[];
   graph: VariableGraph;
   inputNames: Set<string>;
   selectedVar: string | null;
@@ -522,242 +653,113 @@ interface MiniDagProps {
 }
 
 function MiniDag({
-  ordered,
+  nodes,
   graph,
   inputNames,
   selectedVar,
   onHoverVar,
   onPinVar,
 }: MiniDagProps) {
-  const positions = useMemo(() => {
-    const m = new Map<string, number>();
-    ordered.forEach((name, i) => m.set(name, i));
-    return m;
-  }, [ordered]);
+  const layout = useMemo(() => layoutDag(nodes, graph), [nodes, graph]);
 
-  const subgraphSet = useMemo(() => new Set(ordered), [ordered]);
-  const totalHeight = ordered.length * ROW_HEIGHT + 8;
-
-  // Pre-compute relations to the selected node, so each row knows
-  // whether to jitter and whether to draw bold.
-  const relations = useMemo(() => {
-    if (!selectedVar)
-      return {
-        ancestors: new Set<string>(),
-        descendants: new Set<string>(),
-        directParents: new Set<string>(),
-        directChildren: new Set<string>(),
-      };
-    const ancestors = getAncestors(graph, selectedVar);
-    const directParents = new Set(getDirectDeps(graph, selectedVar));
-    const directChildren = new Set<string>();
-    const descendants = new Set<string>();
-    // Children: every node in subgraph that lists selectedVar as a dep.
-    for (const name of ordered) {
-      const deps = getDirectDeps(graph, name);
-      if (deps.includes(selectedVar)) {
-        directChildren.add(name);
-        descendants.add(name);
-      }
+  // Edges incident to selection get emphasized; everything else stays
+  // visible at full structure — only color changes.
+  const incidentEdges = useMemo(() => {
+    if (!selectedVar) return new Set<string>();
+    const s = new Set<string>();
+    for (const { from, to } of layout.edges) {
+      if (from === selectedVar || to === selectedVar) s.add(`${from}→${to}`);
     }
-    // Transitive descendants (BFS).
-    const stack = [...directChildren];
-    while (stack.length) {
-      const n = stack.pop()!;
-      for (const m of ordered) {
-        if (descendants.has(m)) continue;
-        if (getDirectDeps(graph, m).includes(n)) {
-          descendants.add(m);
-          stack.push(m);
-        }
-      }
-    }
-    return { ancestors, descendants, directParents, directChildren };
-  }, [graph, selectedVar, ordered]);
+    return s;
+  }, [selectedVar, layout.edges]);
 
   return (
-    <div style={{ position: "relative", height: totalHeight }}>
+    <div style={{ width: layout.width, minHeight: layout.height }}>
       <svg
-        style={{
-          position: "absolute",
-          inset: 0,
-          pointerEvents: "none",
-          overflow: "visible",
-        }}
-        width="100%"
-        height={totalHeight}
+        width={layout.width}
+        height={layout.height}
+        style={{ display: "block", overflow: "visible" }}
       >
-        {/* Per-row glyphs: dot + small whiskers for "has parent" / "has child" */}
-        {ordered.map((name, i) => {
-          const y = i * ROW_HEIGHT + ROW_HEIGHT / 2 + 4;
-          const hasParents = getDirectDeps(graph, name).some((d) =>
-            subgraphSet.has(d),
-          );
-          const hasChildren = ordered.some((m) =>
-            getDirectDeps(graph, m).includes(name),
-          );
-          const isSelected = name === selectedVar;
-          const inUpstream = relations.ancestors.has(name);
-          const inDownstream = relations.descendants.has(name);
-          const dx =
-            !selectedVar || isSelected
-              ? 0
-              : inUpstream && !inDownstream
-                ? -WHISKER
-                : inDownstream && !inUpstream
-                  ? WHISKER
-                  : 0;
-          const cx = MARGIN_X + dx;
-          const isInput = inputNames.has(name);
-          const fade =
-            !!selectedVar &&
-            !isSelected &&
-            !inUpstream &&
-            !inDownstream;
-          const color = fade
-            ? "#ced4da"
-            : isSelected
-              ? "#1864ab"
-              : "#4361ee";
+        {/* Draw edges first so nodes paint over them. */}
+        {layout.edges.map(({ from, to }) => {
+          const a = layout.positions.get(from);
+          const b = layout.positions.get(to);
+          if (!a || !b) return null;
+          const sy = a.y + NODE_HEIGHT / 2;
+          const ty = b.y - NODE_HEIGHT / 2;
+          const my = (sy + ty) / 2;
+          const incident = incidentEdges.has(`${from}→${to}`);
           return (
-            <g key={`glyph-${name}`} opacity={fade ? 0.45 : 1}>
-              {hasParents && (
-                <path
-                  d={`M ${cx - 3} ${y} h -${WHISKER}`}
-                  stroke={color}
-                  strokeWidth={isSelected ? 2.5 : 1.5}
-                  fill="none"
-                />
-              )}
-              {hasChildren && (
-                <path
-                  d={`M ${cx + 3} ${y} h ${WHISKER}`}
-                  stroke={color}
-                  strokeWidth={isSelected ? 2.5 : 1.5}
-                  fill="none"
-                />
-              )}
-              <circle
-                cx={cx}
-                cy={y}
-                r={isSelected ? 4 : isInput ? 2.5 : 3.5}
-                fill={color}
-              />
-            </g>
+            <path
+              key={`${from}→${to}`}
+              d={`M ${a.x} ${sy} C ${a.x} ${my}, ${b.x} ${my}, ${b.x} ${ty}`}
+              fill="none"
+              stroke={incident ? "#1864ab" : "#adb5bd"}
+              strokeWidth={incident ? 2 : 1.25}
+              opacity={selectedVar && !incident ? 0.55 : 1}
+            />
           );
         })}
 
-        {/* Connection paths for the selected node */}
-        {selectedVar &&
-          positions.has(selectedVar) &&
-          (() => {
-            const sy =
-              (positions.get(selectedVar) ?? 0) * ROW_HEIGHT + ROW_HEIGHT / 2 + 4;
-            const sx = MARGIN_X;
-            const paths: React.ReactNode[] = [];
-            for (const parent of relations.directParents) {
-              if (!positions.has(parent)) continue;
-              const py =
-                (positions.get(parent) ?? 0) * ROW_HEIGHT + ROW_HEIGHT / 2 + 4;
-              // Parent jittered left by WHISKER → terminate at its right whisker
-              const targetX = MARGIN_X - WHISKER + 3;
-              paths.push(
-                <path
-                  key={`up-${parent}`}
-                  d={`M ${sx - 3} ${sy} H ${sx - WHISKER - 4} V ${py} H ${targetX}`}
-                  stroke="#1864ab"
-                  strokeWidth={2.5}
-                  fill="none"
-                />,
-              );
-            }
-            for (const child of relations.directChildren) {
-              if (!positions.has(child)) continue;
-              const cy =
-                (positions.get(child) ?? 0) * ROW_HEIGHT + ROW_HEIGHT / 2 + 4;
-              // Child jittered right by WHISKER → terminate at its left whisker
-              const targetX = MARGIN_X + WHISKER - 3;
-              paths.push(
-                <path
-                  key={`down-${child}`}
-                  d={`M ${sx + 3} ${sy} H ${sx + WHISKER + 4} V ${cy} H ${targetX}`}
-                  stroke="#1864ab"
-                  strokeWidth={2.5}
-                  fill="none"
-                />,
-              );
-            }
-            return paths;
-          })()}
+        {/* Nodes — labeled rounded pills. Click + hover are handled on
+            the foreignObject so they get full HTML button semantics. */}
+        {nodes.map((name) => {
+          const p = layout.positions.get(name);
+          if (!p) return null;
+          const isSelected = name === selectedVar;
+          const isInput = inputNames.has(name);
+          const stroke = isSelected
+            ? "#1864ab"
+            : isInput
+              ? "#ffc078"
+              : "#a5b3c1";
+          const fill = isSelected
+            ? "#e7f5ff"
+            : isInput
+              ? "#fff9db"
+              : "#f8f9fa";
+          return (
+            <g key={`node-${name}`}>
+              <rect
+                x={p.x - p.width / 2}
+                y={p.y - NODE_HEIGHT / 2}
+                width={p.width}
+                height={NODE_HEIGHT}
+                rx={6}
+                fill={fill}
+                stroke={stroke}
+                strokeWidth={isSelected ? 2 : 1}
+              />
+              <foreignObject
+                x={p.x - p.width / 2}
+                y={p.y - NODE_HEIGHT / 2}
+                width={p.width}
+                height={NODE_HEIGHT}
+              >
+                <button
+                  type="button"
+                  aria-label={`inspect ${name}`}
+                  onMouseEnter={() => onHoverVar(name)}
+                  onMouseLeave={() => onHoverVar(null)}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onPinVar(name);
+                  }}
+                  style={{
+                    ...styles.dagNodeButton,
+                    color: isSelected ? "#1864ab" : "#212529",
+                    fontWeight: isSelected ? 700 : 500,
+                  }}
+                >
+                  {name}
+                </button>
+              </foreignObject>
+            </g>
+          );
+        })}
       </svg>
-
-      {/* Variable rows (overlay) */}
-      {ordered.map((name, i) => {
-        const y = i * ROW_HEIGHT;
-        const isSelected = name === selectedVar;
-        const isInput = inputNames.has(name);
-        const fade =
-          !!selectedVar &&
-          !isSelected &&
-          !relations.ancestors.has(name) &&
-          !relations.descendants.has(name);
-        return (
-          <button
-            type="button"
-            key={name}
-            aria-label={`inspect ${name}`}
-            style={{
-              ...styles.dagNameButton,
-              top: y,
-              left: NAME_X,
-              opacity: fade ? 0.5 : 1,
-              fontWeight: isSelected ? 700 : 500,
-              color: isSelected ? "#1864ab" : "#212529",
-            }}
-            onMouseEnter={() => onHoverVar(name)}
-            onMouseLeave={() => onHoverVar(null)}
-            onClick={(e) => {
-              e.stopPropagation();
-              onPinVar(name);
-            }}
-          >
-            {name}
-            {isInput && <span style={styles.tagInput}>input</span>}
-          </button>
-        );
-      })}
     </div>
   );
-}
-
-/**
- * Stable topological order over a node subset. Sources first, then their
- * direct dependents, etc. Cycle-safe.
- */
-function topologicalOrder(
-  nodes: Set<string>,
-  graph: VariableGraph,
-): readonly string[] {
-  const depth = new Map<string, number>();
-  const visiting = new Set<string>();
-  function d(name: string): number {
-    const cached = depth.get(name);
-    if (cached !== undefined) return cached;
-    if (visiting.has(name)) return 0;
-    visiting.add(name);
-    const deps = getDirectDeps(graph, name).filter((p) => nodes.has(p));
-    const v = deps.length === 0 ? 0 : 1 + Math.max(...deps.map(d));
-    visiting.delete(name);
-    depth.set(name, v);
-    return v;
-  }
-  for (const n of nodes) d(n);
-  return [...nodes].sort((a, b) => {
-    const da = depth.get(a) ?? 0;
-    const db = depth.get(b) ?? 0;
-    if (da !== db) return da - db;
-    return a.localeCompare(b);
-  });
 }
 
 // ---------------------------------------------------------------------------
@@ -1026,41 +1028,29 @@ const styles: Record<string, CSSProperties> = {
   },
   body: { display: "flex", flex: 1, minHeight: 0 },
   dagPanel: {
-    flex: "0 0 280px",
+    flex: "0 0 320px",
     overflow: "auto",
     borderRight: "1px solid #e5e7eb",
-    padding: "8px 0",
+    padding: 0,
   },
   previewPanel: {
     flex: 1,
     overflow: "auto",
     padding: "10px 12px",
   },
-  dagNameButton: {
-    position: "absolute",
-    height: ROW_HEIGHT,
-    paddingLeft: 4,
-    paddingRight: 8,
+  dagNodeButton: {
+    width: "100%",
+    height: "100%",
     border: "none",
     background: "transparent",
     cursor: "pointer",
     fontFamily: "ui-monospace, SFMono-Regular, monospace",
     fontSize: 12,
-    textAlign: "left",
-    display: "inline-flex",
-    alignItems: "center",
-    gap: 6,
-    borderRadius: 4,
-    transition: "background 80ms ease",
-  },
-  tagInput: {
-    fontSize: 9,
-    padding: "1px 5px",
-    borderRadius: 999,
-    background: "#fff3bf",
-    color: "#7a4a00",
-    fontWeight: 600,
-    textTransform: "uppercase",
+    padding: 0,
+    margin: 0,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
   },
   previewBody: {},
   previewTitle: {
