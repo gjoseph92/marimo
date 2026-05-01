@@ -9,10 +9,18 @@
 //
 // Positioning is anchored to the inspectable region's bounding box, not
 // the cursor — this keeps mousemove cheap (no per-pixel React updates)
-// and lets the popover stay put while you reach for it. Click on an
-// inspectable region to pin; click anywhere outside the popover (page
-// background or another region) to unpin. To switch pinned regions,
-// hover the new one (the popover transitions on the next mouseover).
+// and lets the popover stay put while you reach for it.
+//
+// Interaction model:
+//   - Hover an inspectable region → popover shows for that region.
+//   - Click an inspectable region → pin it (popover stays even after
+//     the cursor leaves).
+//   - Click anywhere outside the popover → just *unpin*. After that,
+//     hover state takes over: if the cursor is over another
+//     inspectable, the popover shows it; if the cursor isn't over
+//     anything, the popover fades.
+//   - The "unpin" button in the popover header is an explicit
+//     dismissal that clears everything.
 //
 // React doesn't expose which fiber called a hook from inside the hook,
 // so truly automatic tracking would need unstable internals. Instead,
@@ -241,8 +249,12 @@ function InspectorOverlay({
       const region = id ? regionsRef.current.get(id) ?? null : null;
       if (region) {
         cancelClear();
+        // Always update hover, even when pinned, so unpinning later
+        // immediately reflects whatever the cursor is currently over.
+        // The popover display is governed by ``pinned ?? hover``, so
+        // pinned still wins for what's shown.
         setState((prev) =>
-          prev.pinnedRegion || prev.hoverRegion?.id === region.id
+          prev.hoverRegion?.id === region.id
             ? prev
             : { ...prev, hoverRegion: region },
         );
@@ -261,9 +273,10 @@ function InspectorOverlay({
       if (clearTimerRef.current === null) {
         clearTimerRef.current = window.setTimeout(() => {
           clearTimerRef.current = null;
-          setState((prev) =>
-            prev.pinnedRegion ? prev : { ...prev, hoverRegion: null },
-          );
+          // Clear hover regardless of pin so the moment the user
+          // unpins, the popover correctly hides if the cursor isn't
+          // over anything inspectable.
+          setState((prev) => ({ ...prev, hoverRegion: null }));
         }, 100);
       }
     };
@@ -273,22 +286,25 @@ function InspectorOverlay({
       if (!target) return;
       // Clicks inside the popover are owned by its internal handlers.
       if (popoverRef.current?.contains(target)) return;
-      const inspectEl = target.closest<HTMLElement>("[data-inspect-id]");
-      if (inspectEl) {
+
+      setState((prev) => {
+        // While pinned, *any* outside click just unpins. Hover takes
+        // over: if the cursor happens to be over another inspectable,
+        // the popover transitions to that one; if it isn't, the
+        // popover fades. This matches the user's mental model of
+        // "click outside = unpin, not dismiss".
+        if (prev.pinnedRegion) {
+          return { ...prev, pinnedRegion: null };
+        }
+        // Not pinned: clicking an inspectable pins it. Anything else
+        // is a no-op (hover state already governs visibility).
+        const inspectEl = target.closest<HTMLElement>("[data-inspect-id]");
+        if (!inspectEl) return prev;
         const id = inspectEl.getAttribute("data-inspect-id");
         const region = id ? regionsRef.current.get(id) ?? null : null;
-        if (!region) return;
-        // Clicking the same region while pinned acts as toggle-off; any
-        // other region replaces the pin.
-        setState((prev) =>
-          prev.pinnedRegion?.id === region.id
-            ? INITIAL_OVERLAY_STATE
-            : { hoverRegion: region, pinnedRegion: region },
-        );
-        return;
-      }
-      // Click landed outside any inspectable: unpin and hide.
-      setState(INITIAL_OVERLAY_STATE);
+        if (!region) return prev;
+        return { hoverRegion: region, pinnedRegion: region };
+      });
     };
 
     document.addEventListener("mouseover", onMouseOver);

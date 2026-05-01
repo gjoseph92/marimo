@@ -391,9 +391,16 @@ function App() {
 
 The popover is anchored to the inspectable region's bounding box (not
 the cursor), so hover stays cheap and the panel doesn't dart around as
-you reach for it. **Click an inspectable region to pin the popover;
-click anywhere outside (page background or another region) to unpin.**
-Click the same region again to toggle off.
+you reach for it.
+
+- **Hover** an inspectable region → popover shows for that region.
+- **Click** an inspectable region → pin it (popover stays after the
+  cursor leaves).
+- **Click anywhere outside the popover** → just *unpin*. Hover state
+  takes over: if the cursor is over another inspectable, the popover
+  transitions to it; otherwise it fades. Switching pins is therefore
+  "click outside (unpins) → click new region (pins)".
+- The **Unpin** button in the popover header is an explicit dismissal.
 
 Inside the popover:
 
