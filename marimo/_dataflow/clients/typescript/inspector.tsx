@@ -493,21 +493,35 @@ function clamp(v: number, lo: number, hi: number): number {
 }
 
 // ---------------------------------------------------------------------------
-// Mini-DAG — left-to-right layered DAG, drawn all at once.
+// Mini-DAG — column-compressed, top-to-bottom DAG drawn all at once.
 //
-// Layout:
-//   - Each variable goes on a *column* equal to its longest path from
-//     a source within the subgraph (sources on the left, sinks on the
-//     right). All nodes — including siblings within the same column —
-//     get their own row, so the graph reads top-to-bottom and never
-//     fans out horizontally.
-//   - Within a column, nodes are ordered by the median row of their
-//     parents to keep related lineages stacked together.
-//   - Edges are orthogonal: from the source's right edge straight
-//     across to a small "merge column" just left of the target, then
-//     down, then right into the target. Multiple parents of the same
-//     target visually merge at the same vertical line.
-//   - Layout never changes on hover; selection only changes color.
+// Goal: stay narrow even on graphs with wide fan-in or long lineages.
+//
+// Column assignment ("compressed depth"): a node shares its parent's
+// column iff the parent has only one child *and* the child has only
+// one parent (i.e., a 1-to-1 chain edge). Otherwise the node lives
+// one column past its deepest parent. The effect is that long single
+// lineages collapse into one vertical column instead of marching
+// rightward.
+//
+// Row assignment: chain runs stay contiguous within a column. Within
+// a column we walk each chain head — a node whose chain predecessor
+// (the same-column parent) is absent — and lay its chain successors
+// out directly below it.
+//
+// Edge routing depends on the relationship of the endpoints:
+//   - Same column ⇒ "chain" edge: a single vertical segment from the
+//     parent's bottom to the child's top.
+//   - Different column, child has multiple parents ⇒ "fan-in": exit
+//     the parent's right side, run horizontally to the child's center
+//     x, drop straight down into the child's top. All parents of the
+//     same child therefore merge into one vertical drop into the top.
+//   - Different column, child has a single parent (so this *is* a
+//     fan-out from the parent) ⇒ "fan-out": exit the parent's right
+//     side, run to a merge column just left of the child, drop to the
+//     child's vertical center, then enter the child's left side.
+//
+// Layout is static — selection only changes color emphasis.
 // ---------------------------------------------------------------------------
 
 const NODE_HEIGHT = 24;
@@ -524,12 +538,20 @@ interface NodePos {
   x: number; // left edge
   y: number; // top edge
   width: number;
-  column: number;
+  column: number; // visual column index
+}
+
+type EdgeStyle = "chain" | "fanin" | "fanout";
+
+interface Edge {
+  from: string;
+  to: string;
+  style: EdgeStyle;
 }
 
 interface DagLayout {
   positions: Map<string, NodePos>;
-  edges: ReadonlyArray<{ from: string; to: string }>;
+  edges: ReadonlyArray<Edge>;
   width: number;
   height: number;
 }
@@ -537,114 +559,161 @@ interface DagLayout {
 function layoutDag(nodes: readonly string[], graph: VariableGraph): DagLayout {
   const set = new Set(nodes);
 
-  // Column = longest path from any source in the subgraph.
+  // Adjacency in the subgraph.
+  const childrenOf = new Map<string, string[]>();
+  const parentsOf = new Map<string, string[]>();
+  for (const n of nodes) {
+    childrenOf.set(n, []);
+    parentsOf.set(n, getDirectDeps(graph, n).filter((p) => set.has(p)));
+  }
+  for (const n of nodes) {
+    for (const p of parentsOf.get(n)!) childrenOf.get(p)!.push(n);
+  }
+
+  // Compressed depth — chain edges don't increment the column.
   const column = new Map<string, number>();
   const visiting = new Set<string>();
-  function depth(name: string): number {
-    const c = column.get(name);
-    if (c !== undefined) return c;
-    if (visiting.has(name)) return 0; // cycle-safe; treat as a source
+  function computeColumn(name: string): number {
+    const cached = column.get(name);
+    if (cached !== undefined) return cached;
+    if (visiting.has(name)) return 0;
     visiting.add(name);
-    const parents = getDirectDeps(graph, name).filter((p) => set.has(p));
-    const v = parents.length === 0 ? 0 : 1 + Math.max(...parents.map(depth));
+    const parents = parentsOf.get(name)!;
+    let v: number;
+    if (parents.length === 0) {
+      v = 0;
+    } else if (
+      parents.length === 1 &&
+      childrenOf.get(parents[0])!.length === 1
+    ) {
+      // 1-to-1 chain edge — share the parent's column.
+      v = computeColumn(parents[0]);
+    } else {
+      v = Math.max(...parents.map(computeColumn)) + 1;
+    }
     visiting.delete(name);
     column.set(name, v);
     return v;
   }
-  for (const n of nodes) depth(n);
+  for (const n of nodes) computeColumn(n);
 
-  // Bucket by column.
-  const columns: string[][] = [];
-  for (const [n, c] of column) {
-    while (columns.length <= c) columns.push([]);
-    columns[c].push(n);
+  const colNodes = new Map<number, string[]>();
+  for (const n of nodes) {
+    const c = column.get(n)!;
+    if (!colNodes.has(c)) colNodes.set(c, []);
+    colNodes.get(c)!.push(n);
   }
 
-  // Order within each column and assign a unique global row. Column 0
-  // is alphabetical for stability; later columns sort by the median
-  // row of their parents so children stay near the parents that feed
-  // them (reduces vertical edge length).
+  // Topological order (Kahn), stable on ties.
+  const inDeg = new Map<string, number>();
+  for (const n of nodes) inDeg.set(n, parentsOf.get(n)!.length);
+  const queue: string[] = nodes
+    .filter((n) => inDeg.get(n) === 0)
+    .sort((a, b) => a.localeCompare(b));
+  const topo: string[] = [];
+  while (queue.length) {
+    const n = queue.shift()!;
+    topo.push(n);
+    for (const c of childrenOf.get(n)!) {
+      const d = inDeg.get(c)! - 1;
+      inDeg.set(c, d);
+      if (d === 0) {
+        let i = queue.length;
+        while (i > 0 && queue[i - 1].localeCompare(c) > 0) i--;
+        queue.splice(i, 0, c);
+      }
+    }
+  }
+  const topoIdx = new Map<string, number>();
+  topo.forEach((n, i) => topoIdx.set(n, i));
+
+  // Row assignment: process columns in order. Within a column, walk
+  // each chain head down its sole same-column successor so chained
+  // nodes stay contiguous (and disjoint chain runs in the same column
+  // never get visually interleaved).
+  const sortedCols = [...colNodes.keys()].sort((a, b) => a - b);
   const row = new Map<string, number>();
   let nextRow = 0;
-  for (let c = 0; c < columns.length; c++) {
-    const col = columns[c];
-    if (c === 0) {
-      col.sort((a, b) => a.localeCompare(b));
-    } else {
-      col.sort((a, b) => {
-        const ra = medianParentRow(a, set, graph, row);
-        const rb = medianParentRow(b, set, graph, row);
-        return ra - rb || a.localeCompare(b);
-      });
+  for (const c of sortedCols) {
+    const ns = colNodes.get(c)!;
+    const inCol = new Set(ns);
+    const chainPrev = new Map<string, string | null>();
+    for (const n of ns) {
+      chainPrev.set(n, parentsOf.get(n)!.find((p) => inCol.has(p)) ?? null);
     }
-    for (const n of col) row.set(n, nextRow++);
+    const heads = ns
+      .filter((n) => chainPrev.get(n) === null)
+      .sort((a, b) => (topoIdx.get(a) ?? 0) - (topoIdx.get(b) ?? 0));
+    for (const head of heads) {
+      let curr: string | null = head;
+      while (curr !== null) {
+        row.set(curr, nextRow++);
+        // The chain rule guarantees at most one same-column child.
+        curr = childrenOf.get(curr)!.find((c) => inCol.has(c)) ?? null;
+      }
+    }
   }
 
-  // Per-column width = widest node in that column. Pills are
-  // text-sized within bounds.
+  // Pixel layout — nodes centered within their column.
   const widthFor = (name: string) =>
     Math.max(
       MIN_NODE_WIDTH,
       Math.min(MAX_NODE_WIDTH, name.length * (FONT_PX * 0.62) + 22),
     );
-  const colWidth = columns.map((col) =>
-    col.length === 0 ? MIN_NODE_WIDTH : Math.max(...col.map(widthFor)),
+  const colWidth = sortedCols.map((c) =>
+    Math.max(MIN_NODE_WIDTH, ...colNodes.get(c)!.map(widthFor)),
   );
-
-  // Cumulative x offsets per column.
+  const colIdx = new Map<number, number>();
+  sortedCols.forEach((c, i) => colIdx.set(c, i));
   const colX: number[] = [];
   let cx = PADDING_X;
-  for (let c = 0; c < columns.length; c++) {
+  for (let i = 0; i < sortedCols.length; i++) {
     colX.push(cx);
-    cx += colWidth[c] + COL_GAP;
+    cx += colWidth[i] + COL_GAP;
   }
 
   const positions = new Map<string, NodePos>();
   for (const n of nodes) {
-    const c = column.get(n) ?? 0;
-    const r = row.get(n) ?? 0;
+    const c = column.get(n)!;
+    const ci = colIdx.get(c)!;
+    const r = row.get(n)!;
+    const w = widthFor(n);
+    const center = colX[ci] + colWidth[ci] / 2;
     positions.set(n, {
-      x: colX[c],
+      x: center - w / 2,
       y: PADDING_Y + r * (NODE_HEIGHT + ROW_GAP),
-      width: widthFor(n),
-      column: c,
+      width: w,
+      column: ci,
     });
   }
 
-  const edges: Array<{ from: string; to: string }> = [];
+  const edges: Edge[] = [];
   for (const n of nodes) {
-    for (const p of getDirectDeps(graph, n)) {
-      if (set.has(p)) edges.push({ from: p, to: n });
+    for (const p of parentsOf.get(n)!) {
+      let style: EdgeStyle;
+      if (column.get(p) === column.get(n)) {
+        style = "chain";
+      } else if (parentsOf.get(n)!.length > 1) {
+        style = "fanin";
+      } else {
+        style = "fanout";
+      }
+      edges.push({ from: p, to: n, style });
     }
   }
 
-  const totalCols = columns.length;
   const totalWidth =
-    totalCols === 0
+    sortedCols.length === 0
       ? PADDING_X * 2
-      : colX[totalCols - 1] + colWidth[totalCols - 1] + PADDING_X;
+      : colX[sortedCols.length - 1] +
+        colWidth[sortedCols.length - 1] +
+        PADDING_X;
   const totalHeight =
     PADDING_Y * 2 +
     nextRow * NODE_HEIGHT +
     Math.max(0, nextRow - 1) * ROW_GAP;
 
   return { positions, edges, width: totalWidth, height: totalHeight };
-}
-
-function medianParentRow(
-  name: string,
-  set: Set<string>,
-  graph: VariableGraph,
-  row: Map<string, number>,
-): number {
-  const parents = getDirectDeps(graph, name).filter((p) => set.has(p));
-  const rows = parents
-    .map((p) => row.get(p))
-    .filter((r): r is number => r !== undefined)
-    .sort((a, b) => a - b);
-  if (rows.length === 0) return 0;
-  const mid = rows.length >> 1;
-  return rows.length % 2 ? rows[mid] : (rows[mid - 1] + rows[mid]) / 2;
 }
 
 interface MiniDagProps {
@@ -685,24 +754,37 @@ function MiniDag({
         style={{ display: "block", overflow: "visible" }}
       >
         {/* Edges painted first so nodes overlap them cleanly. */}
-        {layout.edges.map(({ from, to }) => {
+        {layout.edges.map(({ from, to, style }) => {
           const a = layout.positions.get(from);
           const b = layout.positions.get(to);
           if (!a || !b) return null;
-          const sx = a.x + a.width;
-          const sy = a.y + NODE_HEIGHT / 2;
-          const tx = b.x;
-          const ty = b.y + NODE_HEIGHT / 2;
-          // Merge column sits just left of the target. All edges
-          // landing on the same target share this x, so multi-parent
-          // joins read as a single junction line dropping into the
-          // node.
-          const mx = Math.max(sx + 2, tx - MERGE_GAP);
+          const aRight = a.x + a.width;
+          const aCenterX = a.x + a.width / 2;
+          const aBottom = a.y + NODE_HEIGHT;
+          const aCenterY = a.y + NODE_HEIGHT / 2;
+          const bLeft = b.x;
+          const bCenterX = b.x + b.width / 2;
+          const bTop = b.y;
+          const bCenterY = b.y + NODE_HEIGHT / 2;
+          let d: string;
+          if (style === "chain") {
+            d = `M ${aCenterX} ${aBottom} V ${bTop}`;
+          } else if (style === "fanin") {
+            // Multi-parent merge into the child's top. All parents of
+            // the same child reuse this x, so they visually converge
+            // into one drop.
+            d = `M ${aRight} ${aCenterY} H ${bCenterX} V ${bTop}`;
+          } else {
+            // Fan-out: one parent, multiple children. Enter the
+            // child's left side via a merge column just to its left.
+            const mx = Math.max(aRight + 2, bLeft - MERGE_GAP);
+            d = `M ${aRight} ${aCenterY} H ${mx} V ${bCenterY} H ${bLeft}`;
+          }
           const incident = incidentEdges.has(`${from}→${to}`);
           return (
             <path
               key={`${from}→${to}`}
-              d={`M ${sx} ${sy} H ${mx} V ${ty} H ${tx}`}
+              d={d}
               fill="none"
               stroke={incident ? "#1864ab" : "#adb5bd"}
               strokeWidth={incident ? 2 : 1.25}
