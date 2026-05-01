@@ -1244,7 +1244,7 @@ const styles: Record<string, CSSProperties> = {
   },
   body: { display: "flex", flex: 1, minHeight: 0 },
   dagPanel: {
-    flex: "0 0 320px",
+    flex: "0 0 256px",
     overflow: "auto",
     borderRight: "1px solid #e5e7eb",
     padding: 0,
