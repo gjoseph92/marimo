@@ -5,7 +5,9 @@
 // hover, a compact mini-DAG of every variable that contributes data to
 // the hovered region (unified ancestor closure when the region reads
 // more than one variable), plus a live, kind-dispatched preview of any
-// node you point at (or click to pin).
+// node you point at (or click to pin). The region's own variable is
+// previewed by default so the popover has a live value the moment it
+// opens.
 //
 // Positioning is anchored to the inspectable region's bounding box, not
 // the cursor — this keeps mousemove cheap (no per-pixel React updates)
@@ -404,7 +406,10 @@ function OverlayPopover({
     [region.element, region.id],
   );
 
-  const visibleVar = pinnedVar ?? hoveredVar;
+  // Show the region's own variable up front so the popover has a live
+  // value as soon as it opens; hover or pin override this fallback.
+  const defaultVar = region.vars[0] ?? null;
+  const visibleVar = pinnedVar ?? hoveredVar ?? defaultVar;
 
   return (
     <div ref={popoverRef} style={popoverStyle} data-dataflow-inspector-popover="">
