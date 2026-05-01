@@ -13,14 +13,18 @@
 //
 // Interaction model:
 //   - Hover an inspectable region → popover shows for that region.
-//   - Click an inspectable region → pin it. Once pinned, the popover
-//     stays put and the inspector stops reacting to hovers/clicks
-//     until you explicitly unpin. This lets you interact with the
-//     surrounding UI (move sliders, click buttons, edit inputs)
-//     while keeping the inspector locked to the same region.
-//   - The "Unpin" button in the popover header is the only way to
-//     unpin; it clears the pin and hides the popover until you hover
-//     something again.
+//   - Pin via either the "pin" button in the popover header or by
+//     clicking the inspectable region itself. Once pinned, the
+//     popover stays put and the inspector stops reacting to hovers
+//     and outside clicks until you explicitly unpin. This lets you
+//     interact with the surrounding UI (move sliders, click buttons,
+//     edit inputs) while keeping the inspector locked to the same
+//     region.
+//   - Unpin via the same toggle button in the popover header (its
+//     label flips to "unpin" while pinned). After unpinning the
+//     popover continues showing the current region in hover mode,
+//     and fades when the cursor leaves both the region and the
+//     popover.
 //
 // React doesn't expose which fiber called a hook from inside the hook,
 // so truly automatic tracking would need unstable internals. Instead,
@@ -292,8 +296,8 @@ function InspectorOverlay({
       setState((prev) => {
         // While pinned, the inspector ignores outside clicks so the
         // user can freely interact with surrounding UI (sliders,
-        // buttons, dropdowns) without losing context. The only way
-        // to unpin is the Unpin button in the popover header.
+        // buttons, dropdowns) without losing context. Unpin via the
+        // toggle button in the popover header.
         if (prev.pinnedRegion) return prev;
         // Not pinned: clicking an inspectable pins it. Clicks on
         // non-inspectable elements are a no-op.
@@ -325,7 +329,20 @@ function InspectorOverlay({
       popoverRef={popoverRef}
       region={region}
       pinned={state.pinnedRegion?.id === region.id}
-      onUnpin={() => setState(INITIAL_OVERLAY_STATE)}
+      onTogglePin={() =>
+        setState((prev) => ({
+          // Toggle: when pinned, unpin (popover keeps showing the
+          // current region in hover mode and can fade as usual);
+          // when unpinned, pin to the currently-displayed region so
+          // the user can interact with surrounding UI without
+          // losing it. Provides an explicit affordance for the
+          // common case where the popover is covering the
+          // inspectable element and the click-to-pin shortcut is
+          // unreachable.
+          ...prev,
+          pinnedRegion: prev.pinnedRegion ? null : prev.hoverRegion,
+        }))
+      }
     />,
     document.body,
   );
@@ -338,7 +355,7 @@ function InspectorOverlay({
 interface OverlayPopoverProps {
   region: InspectableRegion;
   pinned: boolean;
-  onUnpin: () => void;
+  onTogglePin: () => void;
   popoverRef: React.MutableRefObject<HTMLDivElement | null>;
 }
 
@@ -348,7 +365,7 @@ const POPOVER_HEIGHT = 440;
 function OverlayPopover({
   region,
   pinned,
-  onUnpin,
+  onTogglePin,
   popoverRef,
 }: OverlayPopoverProps) {
   const graph = useDataflowGraph();
@@ -397,11 +414,19 @@ function OverlayPopover({
           reads <code>{region.vars.join(", ") || "—"}</code> ·{" "}
           {subgraphNodes.size} variables
         </span>
-        {pinned && (
-          <button type="button" onClick={onUnpin} style={styles.unpinBtn}>
-            unpin
-          </button>
-        )}
+        <button
+          type="button"
+          onClick={onTogglePin}
+          style={styles.pinBtn}
+          aria-pressed={pinned}
+          title={
+            pinned
+              ? "Unpin (popover follows your cursor again)"
+              : "Pin in place (interact with surrounding UI without dismissing)"
+          }
+        >
+          {pinned ? "unpin" : "pin"}
+        </button>
       </header>
 
       <div style={styles.body}>
@@ -1152,7 +1177,7 @@ const styles: Record<string, CSSProperties> = {
     flexShrink: 0,
   },
   headerSub: { color: "#6c757d", fontSize: 11, flex: 1 },
-  unpinBtn: {
+  pinBtn: {
     border: "1px solid #dee2e6",
     background: "#fff",
     borderRadius: 4,
