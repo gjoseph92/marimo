@@ -474,11 +474,16 @@ while you reach for it. Interaction:
 Inside the popover:
 
 - A compact SVG layered DAG of the variables the region reads plus
-  their full ancestor closure (sources at the top, sinks at the
-  bottom). The full graph structure is drawn at once — every edge is
-  always visible. Selecting a node only changes color emphasis
-  (selected pill highlighted, incident edges bolded, non-incident
-  edges faded), never the layout.
+  their full ancestor closure. The graph reads **left-to-right**:
+  each layer is its own column, and siblings within a layer stack
+  *vertically*, so wide fan-ins don't blow up the popover width.
+  Edges are orthogonal — they leave each source's right edge, share
+  a vertical "merge column" just left of their target, and land in
+  the target's left edge — making multi-parent joins read as a
+  single junction. The full graph is drawn at once, and selecting a
+  node only changes color emphasis (selected pill highlighted,
+  incident edges bolded, non-incident edges faded), never the
+  layout.
 - A rich preview pane that dispatches on the variable's `Kind` —
   tables render as HTML tables, dicts as a collapsible JSON tree,
   images as `<img>`, scalars inline.

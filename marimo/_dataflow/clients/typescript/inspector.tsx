@@ -493,34 +493,38 @@ function clamp(v: number, lo: number, hi: number): number {
 }
 
 // ---------------------------------------------------------------------------
-// Mini-DAG — full layered top-down DAG, drawn all at once.
+// Mini-DAG — left-to-right layered DAG, drawn all at once.
 //
 // Layout:
-//   - Each variable goes on a layer equal to its longest path from a
-//     source within the subgraph (Sugiyama y-coordinate). Sources are
-//     at the top, sinks at the bottom.
-//   - Within each layer, nodes are reordered by the barycenter of
-//     their parents in the previous layer to reduce edge crossings.
-//   - Nodes are SVG-positioned labeled rounded rectangles. Edges are
-//     soft cubic bezier curves between layers and are *always*
-//     visible — selecting a node only changes color/emphasis, not
-//     layout or which edges are drawn.
+//   - Each variable goes on a *column* equal to its longest path from
+//     a source within the subgraph (sources on the left, sinks on the
+//     right). All nodes — including siblings within the same column —
+//     get their own row, so the graph reads top-to-bottom and never
+//     fans out horizontally.
+//   - Within a column, nodes are ordered by the median row of their
+//     parents to keep related lineages stacked together.
+//   - Edges are orthogonal: from the source's right edge straight
+//     across to a small "merge column" just left of the target, then
+//     down, then right into the target. Multiple parents of the same
+//     target visually merge at the same vertical line.
+//   - Layout never changes on hover; selection only changes color.
 // ---------------------------------------------------------------------------
 
 const NODE_HEIGHT = 24;
-const LAYER_GAP = 28;
-const NODE_GAP = 12;
-const PADDING_X = 14;
-const PADDING_Y = 14;
+const ROW_GAP = 8;
+const COL_GAP = 36;
+const MERGE_GAP = 14;
+const PADDING_X = 12;
+const PADDING_Y = 12;
 const MIN_NODE_WIDTH = 64;
 const MAX_NODE_WIDTH = 140;
 const FONT_PX = 12;
 
 interface NodePos {
-  x: number; // horizontal *center*
-  y: number; // vertical *center*
+  x: number; // left edge
+  y: number; // top edge
   width: number;
-  layer: number;
+  column: number;
 }
 
 interface DagLayout {
@@ -533,75 +537,77 @@ interface DagLayout {
 function layoutDag(nodes: readonly string[], graph: VariableGraph): DagLayout {
   const set = new Set(nodes);
 
-  // Layer assignment: longest path from any source in the subgraph.
-  const layer = new Map<string, number>();
+  // Column = longest path from any source in the subgraph.
+  const column = new Map<string, number>();
   const visiting = new Set<string>();
   function depth(name: string): number {
-    const c = layer.get(name);
+    const c = column.get(name);
     if (c !== undefined) return c;
-    if (visiting.has(name)) return 0; // cycle-safe, treat as source
+    if (visiting.has(name)) return 0; // cycle-safe; treat as a source
     visiting.add(name);
     const parents = getDirectDeps(graph, name).filter((p) => set.has(p));
     const v = parents.length === 0 ? 0 : 1 + Math.max(...parents.map(depth));
     visiting.delete(name);
-    layer.set(name, v);
+    column.set(name, v);
     return v;
   }
   for (const n of nodes) depth(n);
 
-  // Bucket by layer.
-  const layers: string[][] = [];
-  for (const [n, l] of layer) {
-    while (layers.length <= l) layers.push([]);
-    layers[l].push(n);
+  // Bucket by column.
+  const columns: string[][] = [];
+  for (const [n, c] of column) {
+    while (columns.length <= c) columns.push([]);
+    columns[c].push(n);
   }
 
-  // Crossing reduction: barycenter from above. Two passes is plenty
-  // for small subdags and gives stable, visually clean orderings.
-  const ordOf = new Map<string, number>();
-  for (let pass = 0; pass < 2; pass++) {
-    for (let l = 0; l < layers.length; l++) {
-      const ly = layers[l];
-      if (l === 0) {
-        ly.sort((a, b) => a.localeCompare(b));
-      } else {
-        ly.sort((a, b) => {
-          const ma = barycenter(a, set, graph, ordOf);
-          const mb = barycenter(b, set, graph, ordOf);
-          return ma - mb || a.localeCompare(b);
-        });
-      }
-      ly.forEach((n, i) => ordOf.set(n, i));
+  // Order within each column and assign a unique global row. Column 0
+  // is alphabetical for stability; later columns sort by the median
+  // row of their parents so children stay near the parents that feed
+  // them (reduces vertical edge length).
+  const row = new Map<string, number>();
+  let nextRow = 0;
+  for (let c = 0; c < columns.length; c++) {
+    const col = columns[c];
+    if (c === 0) {
+      col.sort((a, b) => a.localeCompare(b));
+    } else {
+      col.sort((a, b) => {
+        const ra = medianParentRow(a, set, graph, row);
+        const rb = medianParentRow(b, set, graph, row);
+        return ra - rb || a.localeCompare(b);
+      });
     }
+    for (const n of col) row.set(n, nextRow++);
   }
 
-  // Pixel layout: every layer is laid out on the same uniform grid,
-  // sized to fit the widest layer. Node width is text-driven within
-  // bounds, so single-letter names don't get giant pills.
+  // Per-column width = widest node in that column. Pills are
+  // text-sized within bounds.
   const widthFor = (name: string) =>
     Math.max(
       MIN_NODE_WIDTH,
       Math.min(MAX_NODE_WIDTH, name.length * (FONT_PX * 0.62) + 22),
     );
-  const cellWidth =
-    Math.max(
-      ...nodes.map(widthFor),
-      MIN_NODE_WIDTH,
-    ) + NODE_GAP;
-  const maxLayer = Math.max(1, ...layers.map((ly) => ly.length));
-  const gridWidth = cellWidth * maxLayer;
+  const colWidth = columns.map((col) =>
+    col.length === 0 ? MIN_NODE_WIDTH : Math.max(...col.map(widthFor)),
+  );
+
+  // Cumulative x offsets per column.
+  const colX: number[] = [];
+  let cx = PADDING_X;
+  for (let c = 0; c < columns.length; c++) {
+    colX.push(cx);
+    cx += colWidth[c] + COL_GAP;
+  }
 
   const positions = new Map<string, NodePos>();
-  for (let l = 0; l < layers.length; l++) {
-    const ly = layers[l];
-    const startX = PADDING_X + (gridWidth - ly.length * cellWidth) / 2;
-    ly.forEach((n, i) => {
-      positions.set(n, {
-        x: startX + i * cellWidth + cellWidth / 2,
-        y: PADDING_Y + l * (NODE_HEIGHT + LAYER_GAP) + NODE_HEIGHT / 2,
-        width: widthFor(n),
-        layer: l,
-      });
+  for (const n of nodes) {
+    const c = column.get(n) ?? 0;
+    const r = row.get(n) ?? 0;
+    positions.set(n, {
+      x: colX[c],
+      y: PADDING_Y + r * (NODE_HEIGHT + ROW_GAP),
+      width: widthFor(n),
+      column: c,
     });
   }
 
@@ -612,35 +618,33 @@ function layoutDag(nodes: readonly string[], graph: VariableGraph): DagLayout {
     }
   }
 
-  return {
-    positions,
-    edges,
-    width: gridWidth + PADDING_X * 2,
-    height:
-      PADDING_Y * 2 +
-      layers.length * NODE_HEIGHT +
-      Math.max(0, layers.length - 1) * LAYER_GAP,
-  };
+  const totalCols = columns.length;
+  const totalWidth =
+    totalCols === 0
+      ? PADDING_X * 2
+      : colX[totalCols - 1] + colWidth[totalCols - 1] + PADDING_X;
+  const totalHeight =
+    PADDING_Y * 2 +
+    nextRow * NODE_HEIGHT +
+    Math.max(0, nextRow - 1) * ROW_GAP;
+
+  return { positions, edges, width: totalWidth, height: totalHeight };
 }
 
-function barycenter(
+function medianParentRow(
   name: string,
   set: Set<string>,
   graph: VariableGraph,
-  ordOf: Map<string, number>,
+  row: Map<string, number>,
 ): number {
   const parents = getDirectDeps(graph, name).filter((p) => set.has(p));
-  if (parents.length === 0) return 0;
-  let s = 0;
-  let n = 0;
-  for (const p of parents) {
-    const o = ordOf.get(p);
-    if (o !== undefined) {
-      s += o;
-      n++;
-    }
-  }
-  return n === 0 ? 0 : s / n;
+  const rows = parents
+    .map((p) => row.get(p))
+    .filter((r): r is number => r !== undefined)
+    .sort((a, b) => a - b);
+  if (rows.length === 0) return 0;
+  const mid = rows.length >> 1;
+  return rows.length % 2 ? rows[mid] : (rows[mid - 1] + rows[mid]) / 2;
 }
 
 interface MiniDagProps {
@@ -680,19 +684,25 @@ function MiniDag({
         height={layout.height}
         style={{ display: "block", overflow: "visible" }}
       >
-        {/* Draw edges first so nodes paint over them. */}
+        {/* Edges painted first so nodes overlap them cleanly. */}
         {layout.edges.map(({ from, to }) => {
           const a = layout.positions.get(from);
           const b = layout.positions.get(to);
           if (!a || !b) return null;
+          const sx = a.x + a.width;
           const sy = a.y + NODE_HEIGHT / 2;
-          const ty = b.y - NODE_HEIGHT / 2;
-          const my = (sy + ty) / 2;
+          const tx = b.x;
+          const ty = b.y + NODE_HEIGHT / 2;
+          // Merge column sits just left of the target. All edges
+          // landing on the same target share this x, so multi-parent
+          // joins read as a single junction line dropping into the
+          // node.
+          const mx = Math.max(sx + 2, tx - MERGE_GAP);
           const incident = incidentEdges.has(`${from}→${to}`);
           return (
             <path
               key={`${from}→${to}`}
-              d={`M ${a.x} ${sy} C ${a.x} ${my}, ${b.x} ${my}, ${b.x} ${ty}`}
+              d={`M ${sx} ${sy} H ${mx} V ${ty} H ${tx}`}
               fill="none"
               stroke={incident ? "#1864ab" : "#adb5bd"}
               strokeWidth={incident ? 2 : 1.25}
@@ -701,8 +711,9 @@ function MiniDag({
           );
         })}
 
-        {/* Nodes — labeled rounded pills. Click + hover are handled on
-            the foreignObject so they get full HTML button semantics. */}
+        {/* Nodes — labeled rounded pills. Click + hover are handled
+            on the foreignObject so they get full HTML button semantics
+            (focus ring, ARIA, keyboard activation). */}
         {nodes.map((name) => {
           const p = layout.positions.get(name);
           if (!p) return null;
@@ -721,8 +732,8 @@ function MiniDag({
           return (
             <g key={`node-${name}`}>
               <rect
-                x={p.x - p.width / 2}
-                y={p.y - NODE_HEIGHT / 2}
+                x={p.x}
+                y={p.y}
                 width={p.width}
                 height={NODE_HEIGHT}
                 rx={6}
@@ -731,8 +742,8 @@ function MiniDag({
                 strokeWidth={isSelected ? 2 : 1}
               />
               <foreignObject
-                x={p.x - p.width / 2}
-                y={p.y - NODE_HEIGHT / 2}
+                x={p.x}
+                y={p.y}
                 width={p.width}
                 height={NODE_HEIGHT}
               >
