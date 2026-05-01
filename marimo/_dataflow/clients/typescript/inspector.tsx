@@ -543,9 +543,12 @@ function clamp(v: number, lo: number, hi: number): number {
 //   - Same column ⇒ "chain" edge: a single vertical segment from the
 //     parent's bottom to the child's top.
 //   - Different column, child has multiple parents ⇒ "fan-in": exit
-//     the parent's right side, run horizontally a few px past the
-//     child's left edge, drop straight down into the child's top.
-//     All parents of the same child reuse this x, so they visually
+//     the parent's right side, run horizontally to the child's
+//     center x, drop straight down into the child's top. The column
+//     layout puts the child's center just past the parents' right
+//     edges (overlapping the parent column horizontally — safe
+//     because the child sits at later rows), so this H is short.
+//     All parents of the same child reuse this x and visually
 //     converge into one drop into the child's top.
 //   - Different column, child has a single parent (so this *is* a
 //     fan-out from the parent) ⇒ "fan-out": exit the parent's right
@@ -564,10 +567,6 @@ const ROW_GAP = 4;
 const LEVEL_GAP = 18;
 const COL_GAP = 5;
 const MERGE_GAP = 3;
-// Fan-in edges drop into the child's top this many pixels past its
-// left edge, so the merge column hugs the parents' right side instead
-// of running all the way to the child's center.
-const FANIN_INSET = 4;
 // Radius for rounded corners where edge segments turn.
 const CORNER_RADIUS = 3;
 const PADDING_X = 12;
@@ -716,7 +715,7 @@ function layoutDag(nodes: readonly string[], graph: VariableGraph): DagLayout {
     }
   }
 
-  // Pixel layout — nodes centered within their column.
+  // Pixel layout — nodes centered on their column's center x.
   const widthFor = (name: string) =>
     Math.max(
       MIN_NODE_WIDTH,
@@ -725,13 +724,37 @@ function layoutDag(nodes: readonly string[], graph: VariableGraph): DagLayout {
   const colWidth = sortedCols.map((c) =>
     Math.max(MIN_NODE_WIDTH, ...colNodes.get(c)!.map(widthFor)),
   );
+  const colHalfWidth = colWidth.map((w) => w / 2);
   const colIdx = new Map<number, number>();
   sortedCols.forEach((c, i) => colIdx.set(c, i));
-  const colX: number[] = [];
-  let cx = PADDING_X;
-  for (let i = 0; i < sortedCols.length; i++) {
-    colX.push(cx);
-    cx += colWidth[i] + COL_GAP;
+
+  // A column transition has a fan-out edge if some node has 2+
+  // children where at least one is in a different column. Fan-out
+  // siblings share an x range, so we can't overlap their column with
+  // the parent's — a vertical drop in the merge column would pass
+  // straight through the other siblings' rectangles.
+  const hasFanout = nodes.some((n) => {
+    const ch = childrenOf.get(n)!;
+    if (ch.length < 2) return false;
+    return ch.some((c) => parentsOf.get(c)!.length === 1);
+  });
+
+  // Without fan-out we can position each column's center one COL_GAP
+  // past the previous column's right edge — even if that overlaps the
+  // previous column horizontally. Later columns are at later rows, so
+  // node rectangles never collide, and the fan-in merge column ends up
+  // on the child's center axis with only a few pixels of horizontal
+  // edge from the parents.
+  const colCenter: number[] = [];
+  if (sortedCols.length > 0) {
+    colCenter.push(PADDING_X + colHalfWidth[0]);
+    for (let i = 1; i < sortedCols.length; i++) {
+      const prevRight = colCenter[i - 1] + colHalfWidth[i - 1];
+      const minCenter = hasFanout
+        ? prevRight + COL_GAP + colHalfWidth[i]
+        : prevRight + COL_GAP;
+      colCenter.push(minCenter);
+    }
   }
 
   // Depth-aware row Y positions: small gap when adjacent rows are at
@@ -756,9 +779,8 @@ function layoutDag(nodes: readonly string[], graph: VariableGraph): DagLayout {
     const ci = colIdx.get(c)!;
     const r = row.get(n)!;
     const w = widthFor(n);
-    const center = colX[ci] + colWidth[ci] / 2;
     positions.set(n, {
-      x: center - w / 2,
+      x: colCenter[ci] - w / 2,
       y: rowY[r],
       width: w,
       column: ci,
@@ -783,8 +805,8 @@ function layoutDag(nodes: readonly string[], graph: VariableGraph): DagLayout {
   const totalWidth =
     sortedCols.length === 0
       ? PADDING_X * 2
-      : colX[sortedCols.length - 1] +
-        colWidth[sortedCols.length - 1] +
+      : colCenter[sortedCols.length - 1] +
+        colHalfWidth[sortedCols.length - 1] +
         PADDING_X;
   const totalHeight =
     nextRow === 0
@@ -848,17 +870,19 @@ function MiniDag({
           if (style === "chain") {
             d = `M ${aCenterX} ${aBottom} V ${bTop}`;
           } else if (style === "fanin") {
-            // Multi-parent merge into the child's top, close to its
-            // left edge instead of its center. Keeps the horizontal
-            // run short (a few px past the widest parent) while still
-            // entering through the top. All parents of the same child
-            // share this x, so they visually converge into one drop.
-            const mx = bLeft + Math.min(b.width / 2, FANIN_INSET);
-            const r = Math.max(0, Math.min(CORNER_RADIUS, mx - aRight, bTop - aCenterY));
+            // Multi-parent merge into the child's top center. The
+            // column layout puts the child's center just past the
+            // parents' right edges, so the H run is naturally short.
+            // All parents of the same child reuse this x and visually
+            // converge into one drop.
+            const r = Math.max(
+              0,
+              Math.min(CORNER_RADIUS, bCenterX - aRight, bTop - aCenterY),
+            );
             d =
               r > 0.5
-                ? `M ${aRight} ${aCenterY} H ${mx - r} Q ${mx} ${aCenterY} ${mx} ${aCenterY + r} V ${bTop}`
-                : `M ${aRight} ${aCenterY} H ${mx} V ${bTop}`;
+                ? `M ${aRight} ${aCenterY} H ${bCenterX - r} Q ${bCenterX} ${aCenterY} ${bCenterX} ${aCenterY + r} V ${bTop}`
+                : `M ${aRight} ${aCenterY} H ${bCenterX} V ${bTop}`;
           } else {
             // Fan-out: one parent, multiple children. Enter the
             // child's left side via a merge column just to its left.
