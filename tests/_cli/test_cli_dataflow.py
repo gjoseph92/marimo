@@ -96,7 +96,9 @@ def test_skill_md_has_frontmatter() -> None:
     )
     assert p.returncode == 0
     text = p.stdout.decode()
-    assert text.startswith("---\n"), "SKILL.md must start with YAML frontmatter"
+    assert text.startswith("---\n"), (
+        "SKILL.md must start with YAML frontmatter"
+    )
     end = text.find("\n---\n", 4)
     assert end != -1, "SKILL.md frontmatter must close with `---`"
     front = text[4:end]

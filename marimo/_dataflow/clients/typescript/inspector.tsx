@@ -5,14 +5,28 @@
 // hover, a compact mini-DAG of every variable that contributes data to
 // the hovered region (unified ancestor closure when the region reads
 // more than one variable), plus a live, kind-dispatched preview of any
-// node you point at (or click to pin).
+// node you point at (or click to pin). The region's own variable is
+// previewed by default so the popover has a live value the moment it
+// opens.
 //
 // Positioning is anchored to the inspectable region's bounding box, not
 // the cursor — this keeps mousemove cheap (no per-pixel React updates)
-// and lets the popover stay put while you reach for it. Click on an
-// inspectable region to pin; click anywhere outside the popover (page
-// background or another region) to unpin. To switch pinned regions,
-// hover the new one (the popover transitions on the next mouseover).
+// and lets the popover stay put while you reach for it.
+//
+// Interaction model:
+//   - Hover an inspectable region → popover shows for that region.
+//   - Pin via either the "pin" button in the popover header or by
+//     clicking the inspectable region itself. Once pinned, the
+//     popover stays put and the inspector stops reacting to hovers
+//     and outside clicks until you explicitly unpin. This lets you
+//     interact with the surrounding UI (move sliders, click buttons,
+//     edit inputs) while keeping the inspector locked to the same
+//     region.
+//   - Unpin via the same toggle button in the popover header (its
+//     label flips to "unpin" while pinned). After unpinning the
+//     popover continues showing the current region in hover mode,
+//     and fades when the cursor leaves both the region and the
+//     popover.
 //
 // React doesn't expose which fiber called a hook from inside the hook,
 // so truly automatic tracking would need unstable internals. Instead,
@@ -242,6 +256,9 @@ function InspectorOverlay({
       if (region) {
         cancelClear();
         setState((prev) =>
+          // While pinned, ignore hover changes — the user is
+          // interacting with the surrounding UI and the inspector
+          // should stay locked to the pinned region.
           prev.pinnedRegion || prev.hoverRegion?.id === region.id
             ? prev
             : { ...prev, hoverRegion: region },
@@ -262,6 +279,9 @@ function InspectorOverlay({
         clearTimerRef.current = window.setTimeout(() => {
           clearTimerRef.current = null;
           setState((prev) =>
+            // Don't disturb the pinned region; pinned wins for
+            // display, and we want to leave hover untouched so
+            // unpinning later doesn't flash a stale region.
             prev.pinnedRegion ? prev : { ...prev, hoverRegion: null },
           );
         }, 100);
@@ -271,24 +291,25 @@ function InspectorOverlay({
     const onClick = (e: MouseEvent) => {
       const target = e.target as HTMLElement | null;
       if (!target) return;
-      // Clicks inside the popover are owned by its internal handlers.
+      // Clicks inside the popover are owned by its internal handlers
+      // (e.g. the Unpin button, DAG node selection).
       if (popoverRef.current?.contains(target)) return;
-      const inspectEl = target.closest<HTMLElement>("[data-inspect-id]");
-      if (inspectEl) {
+
+      setState((prev) => {
+        // While pinned, the inspector ignores outside clicks so the
+        // user can freely interact with surrounding UI (sliders,
+        // buttons, dropdowns) without losing context. Unpin via the
+        // toggle button in the popover header.
+        if (prev.pinnedRegion) return prev;
+        // Not pinned: clicking an inspectable pins it. Clicks on
+        // non-inspectable elements are a no-op.
+        const inspectEl = target.closest<HTMLElement>("[data-inspect-id]");
+        if (!inspectEl) return prev;
         const id = inspectEl.getAttribute("data-inspect-id");
         const region = id ? regionsRef.current.get(id) ?? null : null;
-        if (!region) return;
-        // Clicking the same region while pinned acts as toggle-off; any
-        // other region replaces the pin.
-        setState((prev) =>
-          prev.pinnedRegion?.id === region.id
-            ? INITIAL_OVERLAY_STATE
-            : { hoverRegion: region, pinnedRegion: region },
-        );
-        return;
-      }
-      // Click landed outside any inspectable: unpin and hide.
-      setState(INITIAL_OVERLAY_STATE);
+        if (!region) return prev;
+        return { hoverRegion: region, pinnedRegion: region };
+      });
     };
 
     document.addEventListener("mouseover", onMouseOver);
@@ -310,7 +331,20 @@ function InspectorOverlay({
       popoverRef={popoverRef}
       region={region}
       pinned={state.pinnedRegion?.id === region.id}
-      onUnpin={() => setState(INITIAL_OVERLAY_STATE)}
+      onTogglePin={() =>
+        setState((prev) => ({
+          // Toggle: when pinned, unpin (popover keeps showing the
+          // current region in hover mode and can fade as usual);
+          // when unpinned, pin to the currently-displayed region so
+          // the user can interact with surrounding UI without
+          // losing it. Provides an explicit affordance for the
+          // common case where the popover is covering the
+          // inspectable element and the click-to-pin shortcut is
+          // unreachable.
+          ...prev,
+          pinnedRegion: prev.pinnedRegion ? null : prev.hoverRegion,
+        }))
+      }
     />,
     document.body,
   );
@@ -323,18 +357,17 @@ function InspectorOverlay({
 interface OverlayPopoverProps {
   region: InspectableRegion;
   pinned: boolean;
-  onUnpin: () => void;
+  onTogglePin: () => void;
   popoverRef: React.MutableRefObject<HTMLDivElement | null>;
 }
 
-const POPOVER_WIDTH = 720;
-const POPOVER_HEIGHT = 420;
-const ROW_HEIGHT = 22;
+const POPOVER_WIDTH = 760;
+const POPOVER_HEIGHT = 440;
 
 function OverlayPopover({
   region,
   pinned,
-  onUnpin,
+  onTogglePin,
   popoverRef,
 }: OverlayPopoverProps) {
   const graph = useDataflowGraph();
@@ -359,11 +392,9 @@ function OverlayPopover({
     return nodes;
   }, [graph, region.vars]);
 
-  // Topologically ordered list — sources up top, sinks at the bottom.
-  const ordered = useMemo(
-    () => topologicalOrder(subgraphNodes, graph),
-    [subgraphNodes, graph],
-  );
+  // Stable node list (membership only — layout is computed inside
+  // ``MiniDag`` from the graph itself).
+  const nodes = useMemo(() => [...subgraphNodes], [subgraphNodes]);
 
   const inputNames = useMemo(
     () => new Set(schema?.inputs.map((i) => i.name) ?? []),
@@ -375,7 +406,10 @@ function OverlayPopover({
     [region.element, region.id],
   );
 
-  const visibleVar = pinnedVar ?? hoveredVar;
+  // Show the region's own variable up front so the popover has a live
+  // value as soon as it opens; hover or pin override this fallback.
+  const defaultVar = region.vars[0] ?? null;
+  const visibleVar = pinnedVar ?? hoveredVar ?? defaultVar;
 
   return (
     <div ref={popoverRef} style={popoverStyle} data-dataflow-inspector-popover="">
@@ -385,17 +419,25 @@ function OverlayPopover({
           reads <code>{region.vars.join(", ") || "—"}</code> ·{" "}
           {subgraphNodes.size} variables
         </span>
-        {pinned && (
-          <button type="button" onClick={onUnpin} style={styles.unpinBtn}>
-            unpin
-          </button>
-        )}
+        <button
+          type="button"
+          onClick={onTogglePin}
+          style={styles.pinBtn}
+          aria-pressed={pinned}
+          title={
+            pinned
+              ? "Unpin (popover follows your cursor again)"
+              : "Pin in place (interact with surrounding UI without dismissing)"
+          }
+        >
+          {pinned ? "unpin" : "pin"}
+        </button>
       </header>
 
       <div style={styles.body}>
         <section style={styles.dagPanel}>
           <MiniDag
-            ordered={ordered}
+            nodes={nodes}
             graph={graph}
             inputNames={inputNames}
             selectedVar={visibleVar}
@@ -419,8 +461,8 @@ function OverlayPopover({
             />
           ) : (
             <p style={styles.placeholder}>
-              Hover any node in the subgraph to preview its value. Click to
-              pin.
+              Hover any node in the graph to preview its value. Click to
+              pin the preview.
             </p>
           )}
         </section>
@@ -481,24 +523,301 @@ function clamp(v: number, lo: number, hi: number): number {
 }
 
 // ---------------------------------------------------------------------------
-// Mini-DAG — marimo-minimap-style compact SVG visualization.
+// Mini-DAG — column-compressed, top-to-bottom DAG drawn all at once.
 //
-// The layout is a single column of fixed-height rows in topological
-// order. Each row has a small circle on the left and the variable name
-// to its right. Connection lines render as a single SVG layer behind
-// the rows: when a variable is selected we draw an L-shaped path from
-// its dot to each ancestor (going up-left) and each descendant (going
-// down-left), terminating at the target row. Ancestors of the selection
-// shift left by ``WHISKER`` so the path can dock cleanly against them;
-// descendants shift right.
+// Goal: stay narrow even on graphs with wide fan-in or long lineages.
+//
+// Column assignment ("compressed depth"): a node shares its parent's
+// column iff the parent has only one child *and* the child has only
+// one parent (i.e., a 1-to-1 chain edge). Otherwise the node lives
+// one column past its deepest parent. The effect is that long single
+// lineages collapse into one vertical column instead of marching
+// rightward.
+//
+// Row assignment: chain runs stay contiguous within a column. Within
+// a column we walk each chain head — a node whose chain predecessor
+// (the same-column parent) is absent — and lay its chain successors
+// out directly below it.
+//
+// Edge routing depends on the relationship of the endpoints:
+//   - Same column ⇒ "chain" edge: a single vertical segment from the
+//     parent's bottom to the child's top.
+//   - Different column, child has multiple parents ⇒ "fan-in": exit
+//     the parent's right side, run horizontally to the child's
+//     center x, drop straight down into the child's top. The column
+//     layout puts the child's center just past the parents' right
+//     edges (overlapping the parent column horizontally — safe
+//     because the child sits at later rows), so this H is short.
+//     All parents of the same child reuse this x and visually
+//     converge into one drop into the child's top.
+//   - Different column, child has a single parent (so this *is* a
+//     fan-out from the parent) ⇒ "fan-out": exit the parent's right
+//     side, run to a merge column just left of the child, drop to the
+//     child's vertical center, then enter the child's left side.
+//
+// Layout is static — selection only changes color emphasis.
 // ---------------------------------------------------------------------------
 
-const MARGIN_X = 32; // left padding inside the dag panel
-const NAME_X = MARGIN_X + 22; // x at which the variable name starts
-const WHISKER = 10;
+const NODE_HEIGHT = 24;
+// Sibling vs. level gap: tighter spacing for nodes at the same depth
+// (visually a sibling group), wider for nodes at different depths
+// (visually a downstream step). Without the difference, chained
+// nodes look like siblings.
+const ROW_GAP = 4;
+const LEVEL_GAP = 18;
+const COL_GAP = 16;
+const MERGE_GAP = 6;
+// Radius for rounded corners where edge segments turn.
+const CORNER_RADIUS = 3;
+const PADDING_X = 12;
+const PADDING_Y = 12;
+const MIN_NODE_WIDTH = 64;
+const MAX_NODE_WIDTH = 140;
+const FONT_PX = 12;
+
+interface NodePos {
+  x: number; // left edge
+  y: number; // top edge
+  width: number;
+  column: number; // visual column index
+}
+
+type EdgeStyle = "chain" | "fanin" | "fanout";
+
+interface Edge {
+  from: string;
+  to: string;
+  style: EdgeStyle;
+}
+
+interface DagLayout {
+  positions: Map<string, NodePos>;
+  edges: ReadonlyArray<Edge>;
+  width: number;
+  height: number;
+}
+
+function layoutDag(nodes: readonly string[], graph: VariableGraph): DagLayout {
+  const set = new Set(nodes);
+
+  // Adjacency in the subgraph.
+  const childrenOf = new Map<string, string[]>();
+  const parentsOf = new Map<string, string[]>();
+  for (const n of nodes) {
+    childrenOf.set(n, []);
+    parentsOf.set(n, getDirectDeps(graph, n).filter((p) => set.has(p)));
+  }
+  for (const n of nodes) {
+    for (const p of parentsOf.get(n)!) childrenOf.get(p)!.push(n);
+  }
+
+  // Compressed depth — chain edges don't increment the column.
+  const column = new Map<string, number>();
+  const visiting = new Set<string>();
+  function computeColumn(name: string): number {
+    const cached = column.get(name);
+    if (cached !== undefined) return cached;
+    if (visiting.has(name)) return 0;
+    visiting.add(name);
+    const parents = parentsOf.get(name)!;
+    let v: number;
+    if (parents.length === 0) {
+      v = 0;
+    } else if (
+      parents.length === 1 &&
+      childrenOf.get(parents[0])!.length === 1
+    ) {
+      // 1-to-1 chain edge — share the parent's column.
+      v = computeColumn(parents[0]);
+    } else {
+      v = Math.max(...parents.map(computeColumn)) + 1;
+    }
+    visiting.delete(name);
+    column.set(name, v);
+    return v;
+  }
+  for (const n of nodes) computeColumn(n);
+
+  // True depth (longest path from a source) — chain edges *do*
+  // increment this. Used purely to widen the vertical gap between
+  // adjacent rows whose depths differ, so chained children visually
+  // sit below their parent rather than alongside siblings.
+  const depth = new Map<string, number>();
+  const visitingD = new Set<string>();
+  function computeDepth(name: string): number {
+    const cached = depth.get(name);
+    if (cached !== undefined) return cached;
+    if (visitingD.has(name)) return 0;
+    visitingD.add(name);
+    const parents = parentsOf.get(name)!;
+    const v =
+      parents.length === 0 ? 0 : 1 + Math.max(...parents.map(computeDepth));
+    visitingD.delete(name);
+    depth.set(name, v);
+    return v;
+  }
+  for (const n of nodes) computeDepth(n);
+
+  const colNodes = new Map<number, string[]>();
+  for (const n of nodes) {
+    const c = column.get(n)!;
+    if (!colNodes.has(c)) colNodes.set(c, []);
+    colNodes.get(c)!.push(n);
+  }
+
+  // Topological order (Kahn), stable on ties.
+  const inDeg = new Map<string, number>();
+  for (const n of nodes) inDeg.set(n, parentsOf.get(n)!.length);
+  const queue: string[] = nodes
+    .filter((n) => inDeg.get(n) === 0)
+    .sort((a, b) => a.localeCompare(b));
+  const topo: string[] = [];
+  while (queue.length) {
+    const n = queue.shift()!;
+    topo.push(n);
+    for (const c of childrenOf.get(n)!) {
+      const d = inDeg.get(c)! - 1;
+      inDeg.set(c, d);
+      if (d === 0) {
+        let i = queue.length;
+        while (i > 0 && queue[i - 1].localeCompare(c) > 0) i--;
+        queue.splice(i, 0, c);
+      }
+    }
+  }
+  const topoIdx = new Map<string, number>();
+  topo.forEach((n, i) => topoIdx.set(n, i));
+
+  // Row assignment: process columns in order. Within a column, walk
+  // each chain head down its sole same-column successor so chained
+  // nodes stay contiguous (and disjoint chain runs in the same column
+  // never get visually interleaved).
+  const sortedCols = [...colNodes.keys()].sort((a, b) => a - b);
+  const row = new Map<string, number>();
+  let nextRow = 0;
+  for (const c of sortedCols) {
+    const ns = colNodes.get(c)!;
+    const inCol = new Set(ns);
+    const chainPrev = new Map<string, string | null>();
+    for (const n of ns) {
+      chainPrev.set(n, parentsOf.get(n)!.find((p) => inCol.has(p)) ?? null);
+    }
+    const heads = ns
+      .filter((n) => chainPrev.get(n) === null)
+      .sort((a, b) => (topoIdx.get(a) ?? 0) - (topoIdx.get(b) ?? 0));
+    for (const head of heads) {
+      let curr: string | null = head;
+      while (curr !== null) {
+        row.set(curr, nextRow++);
+        // The chain rule guarantees at most one same-column child.
+        curr = childrenOf.get(curr)!.find((c) => inCol.has(c)) ?? null;
+      }
+    }
+  }
+
+  // Pixel layout — nodes centered on their column's center x.
+  const widthFor = (name: string) =>
+    Math.max(
+      MIN_NODE_WIDTH,
+      Math.min(MAX_NODE_WIDTH, name.length * (FONT_PX * 0.62) + 22),
+    );
+  const colWidth = sortedCols.map((c) =>
+    Math.max(MIN_NODE_WIDTH, ...colNodes.get(c)!.map(widthFor)),
+  );
+  const colHalfWidth = colWidth.map((w) => w / 2);
+  const colIdx = new Map<number, number>();
+  sortedCols.forEach((c, i) => colIdx.set(c, i));
+
+  // A column transition has a fan-out edge if some node has 2+
+  // children where at least one is in a different column. Fan-out
+  // siblings share an x range, so we can't overlap their column with
+  // the parent's — a vertical drop in the merge column would pass
+  // straight through the other siblings' rectangles.
+  const hasFanout = nodes.some((n) => {
+    const ch = childrenOf.get(n)!;
+    if (ch.length < 2) return false;
+    return ch.some((c) => parentsOf.get(c)!.length === 1);
+  });
+
+  // Without fan-out we can position each column's center one COL_GAP
+  // past the previous column's right edge — even if that overlaps the
+  // previous column horizontally. Later columns are at later rows, so
+  // node rectangles never collide, and the fan-in merge column ends up
+  // on the child's center axis with only a few pixels of horizontal
+  // edge from the parents.
+  const colCenter: number[] = [];
+  if (sortedCols.length > 0) {
+    colCenter.push(PADDING_X + colHalfWidth[0]);
+    for (let i = 1; i < sortedCols.length; i++) {
+      const prevRight = colCenter[i - 1] + colHalfWidth[i - 1];
+      const minCenter = hasFanout
+        ? prevRight + COL_GAP + colHalfWidth[i]
+        : prevRight + COL_GAP;
+      colCenter.push(minCenter);
+    }
+  }
+
+  // Depth-aware row Y positions: small gap when adjacent rows are at
+  // the same depth (sibling group), wider gap when they differ
+  // (downstream step). Built once for all rows and indexed by row.
+  const nodeAtRow: string[] = new Array(nextRow);
+  for (const [n, r] of row) nodeAtRow[r] = n;
+  const rowY: number[] = [];
+  let cy = PADDING_Y;
+  for (let r = 0; r < nextRow; r++) {
+    if (r > 0) {
+      const sameLevel =
+        depth.get(nodeAtRow[r]) === depth.get(nodeAtRow[r - 1]);
+      cy += NODE_HEIGHT + (sameLevel ? ROW_GAP : LEVEL_GAP);
+    }
+    rowY.push(cy);
+  }
+
+  const positions = new Map<string, NodePos>();
+  for (const n of nodes) {
+    const c = column.get(n)!;
+    const ci = colIdx.get(c)!;
+    const r = row.get(n)!;
+    const w = widthFor(n);
+    positions.set(n, {
+      x: colCenter[ci] - w / 2,
+      y: rowY[r],
+      width: w,
+      column: ci,
+    });
+  }
+
+  const edges: Edge[] = [];
+  for (const n of nodes) {
+    for (const p of parentsOf.get(n)!) {
+      let style: EdgeStyle;
+      if (column.get(p) === column.get(n)) {
+        style = "chain";
+      } else if (parentsOf.get(n)!.length > 1) {
+        style = "fanin";
+      } else {
+        style = "fanout";
+      }
+      edges.push({ from: p, to: n, style });
+    }
+  }
+
+  const totalWidth =
+    sortedCols.length === 0
+      ? PADDING_X * 2
+      : colCenter[sortedCols.length - 1] +
+        colHalfWidth[sortedCols.length - 1] +
+        PADDING_X;
+  const totalHeight =
+    nextRow === 0
+      ? PADDING_Y * 2
+      : rowY[nextRow - 1] + NODE_HEIGHT + PADDING_Y;
+
+  return { positions, edges, width: totalWidth, height: totalHeight };
+}
 
 interface MiniDagProps {
-  ordered: readonly string[];
+  nodes: readonly string[];
   graph: VariableGraph;
   inputNames: Set<string>;
   selectedVar: string | null;
@@ -507,242 +826,154 @@ interface MiniDagProps {
 }
 
 function MiniDag({
-  ordered,
+  nodes,
   graph,
   inputNames,
   selectedVar,
   onHoverVar,
   onPinVar,
 }: MiniDagProps) {
-  const positions = useMemo(() => {
-    const m = new Map<string, number>();
-    ordered.forEach((name, i) => m.set(name, i));
-    return m;
-  }, [ordered]);
+  const layout = useMemo(() => layoutDag(nodes, graph), [nodes, graph]);
 
-  const subgraphSet = useMemo(() => new Set(ordered), [ordered]);
-  const totalHeight = ordered.length * ROW_HEIGHT + 8;
-
-  // Pre-compute relations to the selected node, so each row knows
-  // whether to jitter and whether to draw bold.
-  const relations = useMemo(() => {
-    if (!selectedVar)
-      return {
-        ancestors: new Set<string>(),
-        descendants: new Set<string>(),
-        directParents: new Set<string>(),
-        directChildren: new Set<string>(),
-      };
-    const ancestors = getAncestors(graph, selectedVar);
-    const directParents = new Set(getDirectDeps(graph, selectedVar));
-    const directChildren = new Set<string>();
-    const descendants = new Set<string>();
-    // Children: every node in subgraph that lists selectedVar as a dep.
-    for (const name of ordered) {
-      const deps = getDirectDeps(graph, name);
-      if (deps.includes(selectedVar)) {
-        directChildren.add(name);
-        descendants.add(name);
-      }
+  // Edges incident to selection get emphasized; everything else stays
+  // visible at full structure — only color changes.
+  const incidentEdges = useMemo(() => {
+    if (!selectedVar) return new Set<string>();
+    const s = new Set<string>();
+    for (const { from, to } of layout.edges) {
+      if (from === selectedVar || to === selectedVar) s.add(`${from}→${to}`);
     }
-    // Transitive descendants (BFS).
-    const stack = [...directChildren];
-    while (stack.length) {
-      const n = stack.pop()!;
-      for (const m of ordered) {
-        if (descendants.has(m)) continue;
-        if (getDirectDeps(graph, m).includes(n)) {
-          descendants.add(m);
-          stack.push(m);
-        }
-      }
-    }
-    return { ancestors, descendants, directParents, directChildren };
-  }, [graph, selectedVar, ordered]);
+    return s;
+  }, [selectedVar, layout.edges]);
 
   return (
-    <div style={{ position: "relative", height: totalHeight }}>
+    <div style={{ width: layout.width, minHeight: layout.height }}>
       <svg
-        style={{
-          position: "absolute",
-          inset: 0,
-          pointerEvents: "none",
-          overflow: "visible",
-        }}
-        width="100%"
-        height={totalHeight}
+        width={layout.width}
+        height={layout.height}
+        style={{ display: "block", overflow: "visible" }}
       >
-        {/* Per-row glyphs: dot + small whiskers for "has parent" / "has child" */}
-        {ordered.map((name, i) => {
-          const y = i * ROW_HEIGHT + ROW_HEIGHT / 2 + 4;
-          const hasParents = getDirectDeps(graph, name).some((d) =>
-            subgraphSet.has(d),
-          );
-          const hasChildren = ordered.some((m) =>
-            getDirectDeps(graph, m).includes(name),
-          );
-          const isSelected = name === selectedVar;
-          const inUpstream = relations.ancestors.has(name);
-          const inDownstream = relations.descendants.has(name);
-          const dx =
-            !selectedVar || isSelected
-              ? 0
-              : inUpstream && !inDownstream
-                ? -WHISKER
-                : inDownstream && !inUpstream
-                  ? WHISKER
-                  : 0;
-          const cx = MARGIN_X + dx;
-          const isInput = inputNames.has(name);
-          const fade =
-            !!selectedVar &&
-            !isSelected &&
-            !inUpstream &&
-            !inDownstream;
-          const color = fade
-            ? "#ced4da"
-            : isSelected
-              ? "#1864ab"
-              : "#4361ee";
+        {/* Edges painted first so nodes overlap them cleanly. */}
+        {layout.edges.map(({ from, to, style }) => {
+          const a = layout.positions.get(from);
+          const b = layout.positions.get(to);
+          if (!a || !b) return null;
+          const aRight = a.x + a.width;
+          const aCenterX = a.x + a.width / 2;
+          const aBottom = a.y + NODE_HEIGHT;
+          const aCenterY = a.y + NODE_HEIGHT / 2;
+          const bLeft = b.x;
+          const bCenterX = b.x + b.width / 2;
+          const bTop = b.y;
+          const bCenterY = b.y + NODE_HEIGHT / 2;
+          let d: string;
+          if (style === "chain") {
+            d = `M ${aCenterX} ${aBottom} V ${bTop}`;
+          } else if (style === "fanin") {
+            // Multi-parent merge into the child's top center. The
+            // column layout puts the child's center just past the
+            // parents' right edges, so the H run is naturally short.
+            // All parents of the same child reuse this x and visually
+            // converge into one drop.
+            const r = Math.max(
+              0,
+              Math.min(CORNER_RADIUS, bCenterX - aRight, bTop - aCenterY),
+            );
+            d =
+              r > 0.5
+                ? `M ${aRight} ${aCenterY} H ${bCenterX - r} Q ${bCenterX} ${aCenterY} ${bCenterX} ${aCenterY + r} V ${bTop}`
+                : `M ${aRight} ${aCenterY} H ${bCenterX} V ${bTop}`;
+          } else {
+            // Fan-out: one parent, multiple children. Enter the
+            // child's left side via a merge column just to its left.
+            const mx = Math.max(aRight + 2, bLeft - MERGE_GAP);
+            const r = Math.max(
+              0,
+              Math.min(
+                CORNER_RADIUS,
+                mx - aRight,
+                (bCenterY - aCenterY) / 2,
+                bLeft - mx,
+              ),
+            );
+            d =
+              r > 0.5
+                ? `M ${aRight} ${aCenterY} H ${mx - r} Q ${mx} ${aCenterY} ${mx} ${aCenterY + r} V ${bCenterY - r} Q ${mx} ${bCenterY} ${mx + r} ${bCenterY} H ${bLeft}`
+                : `M ${aRight} ${aCenterY} H ${mx} V ${bCenterY} H ${bLeft}`;
+          }
+          const incident = incidentEdges.has(`${from}→${to}`);
           return (
-            <g key={`glyph-${name}`} opacity={fade ? 0.45 : 1}>
-              {hasParents && (
-                <path
-                  d={`M ${cx - 3} ${y} h -${WHISKER}`}
-                  stroke={color}
-                  strokeWidth={isSelected ? 2.5 : 1.5}
-                  fill="none"
-                />
-              )}
-              {hasChildren && (
-                <path
-                  d={`M ${cx + 3} ${y} h ${WHISKER}`}
-                  stroke={color}
-                  strokeWidth={isSelected ? 2.5 : 1.5}
-                  fill="none"
-                />
-              )}
-              <circle
-                cx={cx}
-                cy={y}
-                r={isSelected ? 4 : isInput ? 2.5 : 3.5}
-                fill={color}
-              />
-            </g>
+            <path
+              key={`${from}→${to}`}
+              d={d}
+              fill="none"
+              stroke={incident ? "#1864ab" : "#adb5bd"}
+              strokeWidth={incident ? 2 : 1.25}
+              opacity={selectedVar && !incident ? 0.55 : 1}
+            />
           );
         })}
 
-        {/* Connection paths for the selected node */}
-        {selectedVar &&
-          positions.has(selectedVar) &&
-          (() => {
-            const sy =
-              (positions.get(selectedVar) ?? 0) * ROW_HEIGHT + ROW_HEIGHT / 2 + 4;
-            const sx = MARGIN_X;
-            const paths: React.ReactNode[] = [];
-            for (const parent of relations.directParents) {
-              if (!positions.has(parent)) continue;
-              const py =
-                (positions.get(parent) ?? 0) * ROW_HEIGHT + ROW_HEIGHT / 2 + 4;
-              // Parent jittered left by WHISKER → terminate at its right whisker
-              const targetX = MARGIN_X - WHISKER + 3;
-              paths.push(
-                <path
-                  key={`up-${parent}`}
-                  d={`M ${sx - 3} ${sy} H ${sx - WHISKER - 4} V ${py} H ${targetX}`}
-                  stroke="#1864ab"
-                  strokeWidth={2.5}
-                  fill="none"
-                />,
-              );
-            }
-            for (const child of relations.directChildren) {
-              if (!positions.has(child)) continue;
-              const cy =
-                (positions.get(child) ?? 0) * ROW_HEIGHT + ROW_HEIGHT / 2 + 4;
-              // Child jittered right by WHISKER → terminate at its left whisker
-              const targetX = MARGIN_X + WHISKER - 3;
-              paths.push(
-                <path
-                  key={`down-${child}`}
-                  d={`M ${sx + 3} ${sy} H ${sx + WHISKER + 4} V ${cy} H ${targetX}`}
-                  stroke="#1864ab"
-                  strokeWidth={2.5}
-                  fill="none"
-                />,
-              );
-            }
-            return paths;
-          })()}
+        {/* Nodes — labeled rounded pills. Click + hover are handled
+            on the foreignObject so they get full HTML button semantics
+            (focus ring, ARIA, keyboard activation). */}
+        {nodes.map((name) => {
+          const p = layout.positions.get(name);
+          if (!p) return null;
+          const isSelected = name === selectedVar;
+          const isInput = inputNames.has(name);
+          const stroke = isSelected
+            ? "#1864ab"
+            : isInput
+              ? "#ffc078"
+              : "#a5b3c1";
+          const fill = isSelected
+            ? "#e7f5ff"
+            : isInput
+              ? "#fff9db"
+              : "#f8f9fa";
+          return (
+            <g key={`node-${name}`}>
+              <rect
+                x={p.x}
+                y={p.y}
+                width={p.width}
+                height={NODE_HEIGHT}
+                rx={6}
+                fill={fill}
+                stroke={stroke}
+                strokeWidth={isSelected ? 2 : 1}
+              />
+              <foreignObject
+                x={p.x}
+                y={p.y}
+                width={p.width}
+                height={NODE_HEIGHT}
+              >
+                <button
+                  type="button"
+                  aria-label={`inspect ${name}`}
+                  onMouseEnter={() => onHoverVar(name)}
+                  onMouseLeave={() => onHoverVar(null)}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onPinVar(name);
+                  }}
+                  style={{
+                    ...styles.dagNodeButton,
+                    color: isSelected ? "#1864ab" : "#212529",
+                    fontWeight: isSelected ? 700 : 500,
+                  }}
+                >
+                  {name}
+                </button>
+              </foreignObject>
+            </g>
+          );
+        })}
       </svg>
-
-      {/* Variable rows (overlay) */}
-      {ordered.map((name, i) => {
-        const y = i * ROW_HEIGHT;
-        const isSelected = name === selectedVar;
-        const isInput = inputNames.has(name);
-        const fade =
-          !!selectedVar &&
-          !isSelected &&
-          !relations.ancestors.has(name) &&
-          !relations.descendants.has(name);
-        return (
-          <button
-            type="button"
-            key={name}
-            aria-label={`inspect ${name}`}
-            style={{
-              ...styles.dagNameButton,
-              top: y,
-              left: NAME_X,
-              opacity: fade ? 0.5 : 1,
-              fontWeight: isSelected ? 700 : 500,
-              color: isSelected ? "#1864ab" : "#212529",
-            }}
-            onMouseEnter={() => onHoverVar(name)}
-            onMouseLeave={() => onHoverVar(null)}
-            onClick={(e) => {
-              e.stopPropagation();
-              onPinVar(name);
-            }}
-          >
-            {name}
-            {isInput && <span style={styles.tagInput}>input</span>}
-          </button>
-        );
-      })}
     </div>
   );
-}
-
-/**
- * Stable topological order over a node subset. Sources first, then their
- * direct dependents, etc. Cycle-safe.
- */
-function topologicalOrder(
-  nodes: Set<string>,
-  graph: VariableGraph,
-): readonly string[] {
-  const depth = new Map<string, number>();
-  const visiting = new Set<string>();
-  function d(name: string): number {
-    const cached = depth.get(name);
-    if (cached !== undefined) return cached;
-    if (visiting.has(name)) return 0;
-    visiting.add(name);
-    const deps = getDirectDeps(graph, name).filter((p) => nodes.has(p));
-    const v = deps.length === 0 ? 0 : 1 + Math.max(...deps.map(d));
-    visiting.delete(name);
-    depth.set(name, v);
-    return v;
-  }
-  for (const n of nodes) d(n);
-  return [...nodes].sort((a, b) => {
-    const da = depth.get(a) ?? 0;
-    const db = depth.get(b) ?? 0;
-    if (da !== db) return da - db;
-    return a.localeCompare(b);
-  });
 }
 
 // ---------------------------------------------------------------------------
@@ -768,7 +999,9 @@ function PreviewPanelWithSubscription({
 }) {
   // Inputs flow through a separate channel — read directly from the
   // input store so the preview shows the current bound value.
-  const inputValue = useDataflowInput(isInput ? name : "");
+  // ``useDataflowInput`` returns a [value, setter] tuple (useState
+  // shape); we only want the current value here.
+  const [inputValue] = useDataflowInput(isInput ? name : "");
   const liveValue = useDataflowValue(isInput ? "" : name);
 
   return (
@@ -1001,7 +1234,7 @@ const styles: Record<string, CSSProperties> = {
     flexShrink: 0,
   },
   headerSub: { color: "#6c757d", fontSize: 11, flex: 1 },
-  unpinBtn: {
+  pinBtn: {
     border: "1px solid #dee2e6",
     background: "#fff",
     borderRadius: 4,
@@ -1011,41 +1244,29 @@ const styles: Record<string, CSSProperties> = {
   },
   body: { display: "flex", flex: 1, minHeight: 0 },
   dagPanel: {
-    flex: "0 0 280px",
+    flex: "0 0 256px",
     overflow: "auto",
     borderRight: "1px solid #e5e7eb",
-    padding: "8px 0",
+    padding: 0,
   },
   previewPanel: {
     flex: 1,
     overflow: "auto",
     padding: "10px 12px",
   },
-  dagNameButton: {
-    position: "absolute",
-    height: ROW_HEIGHT,
-    paddingLeft: 4,
-    paddingRight: 8,
+  dagNodeButton: {
+    width: "100%",
+    height: "100%",
     border: "none",
     background: "transparent",
     cursor: "pointer",
     fontFamily: "ui-monospace, SFMono-Regular, monospace",
     fontSize: 12,
-    textAlign: "left",
-    display: "inline-flex",
-    alignItems: "center",
-    gap: 6,
-    borderRadius: 4,
-    transition: "background 80ms ease",
-  },
-  tagInput: {
-    fontSize: 9,
-    padding: "1px 5px",
-    borderRadius: 999,
-    background: "#fff3bf",
-    color: "#7a4a00",
-    fontWeight: 600,
-    textTransform: "uppercase",
+    padding: 0,
+    margin: 0,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
   },
   previewBody: {},
   previewTitle: {

@@ -57,7 +57,7 @@ def _resolve(*parts: str) -> str:
         "TypeScript client and the agent skill that ship inside the "
         "marimo wheel.\n\n"
         "Run ``marimo dataflow skill`` for an end-to-end recipe, or "
-        "``gh skill install --from-local \"$(marimo dataflow skill --path)\"`` "
+        '``gh skill install --from-local "$(marimo dataflow skill --path)"`` '
         "to register it with your local agent."
     ),
 )

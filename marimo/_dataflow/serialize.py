@@ -24,6 +24,14 @@ def infer_kind(value: Any) -> Kind:
     if isinstance(value, bytes):
         return Kind.BYTES
     if isinstance(value, list):
+        # A non-empty list of dicts is the JSON-records shape of a
+        # table; surface it as TABLE so the client picks the table
+        # renderer. Sample a bounded prefix to stay cheap on large
+        # inputs.
+        if value and all(
+            isinstance(v, dict) for v in value[:_TABLE_SAMPLE_SIZE]
+        ):
+            return Kind.TABLE
         return Kind.LIST
     if isinstance(value, dict):
         return Kind.DICT
@@ -41,6 +49,9 @@ def infer_kind(value: Any) -> Kind:
         return Kind.TENSOR
 
     return Kind.ANY
+
+
+_TABLE_SAMPLE_SIZE = 16
 
 
 def serialize_value(

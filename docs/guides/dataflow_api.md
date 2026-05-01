@@ -391,16 +391,36 @@ function App() {
 
 The popover is anchored to the inspectable region's bounding box (not
 the cursor), so hover stays cheap and the panel doesn't dart around as
-you reach for it. **Click an inspectable region to pin the popover;
-click anywhere outside (page background or another region) to unpin.**
-Click the same region again to toggle off.
+you reach for it.
+
+- **Hover** an inspectable region → popover shows for that region.
+- **Pin** with the toggle button in the popover header (or by
+  clicking the inspectable region itself, when the popover isn't
+  covering it). Once pinned, the inspector stops reacting to hovers
+  and outside clicks, so you can freely move sliders, click buttons,
+  and edit inputs while keeping the inspector locked to the same
+  region.
+- **Unpin** with the same toggle button (its label flips to "unpin"
+  while pinned). The popover keeps showing the current region in
+  hover mode and fades when the cursor leaves both the region and
+  the popover.
 
 Inside the popover:
 
-- A compact SVG mini-DAG of the variables the region reads plus their
-  full ancestor closure, sources at the top and sinks at the bottom.
-  Selecting a node bolds it and draws L-shaped connections to its
-  direct parents and children, fading unrelated nodes.
+- A compact SVG layered DAG of the variables the region reads plus
+  their full ancestor closure. Layout is **column-compressed**: a
+  variable shares its parent's column when there's a 1-to-1 chain
+  edge between them, so a long single lineage collapses into one
+  vertical column instead of marching rightward. Siblings stack
+  vertically within their column. Edges fall into three shapes:
+  chain edges run as a single vertical segment between consecutive
+  rows; fan-in edges (multi-parent target) leave each source's
+  right side and converge into one vertical drop into the target's
+  *top*; fan-out edges (single parent → multiple children) leave
+  the parent's right side and enter each child from the left. The
+  full graph is drawn at once, and selecting a node only changes
+  color emphasis (selected pill highlighted, incident edges
+  bolded, non-incident edges faded), never the layout.
 - A rich preview pane that dispatches on the variable's `Kind` —
   tables render as HTML tables, dicts as a collapsible JSON tree,
   images as `<img>`, scalars inline.
