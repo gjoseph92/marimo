@@ -565,7 +565,7 @@ const NODE_HEIGHT = 24;
 // nodes look like siblings.
 const ROW_GAP = 4;
 const LEVEL_GAP = 18;
-const COL_GAP = 12;
+const COL_GAP = 16;
 const MERGE_GAP = 6;
 // Radius for rounded corners where edge segments turn.
 const CORNER_RADIUS = 3;
@@ -999,7 +999,9 @@ function PreviewPanelWithSubscription({
 }) {
   // Inputs flow through a separate channel — read directly from the
   // input store so the preview shows the current bound value.
-  const inputValue = useDataflowInput(isInput ? name : "");
+  // ``useDataflowInput`` returns a [value, setter] tuple (useState
+  // shape); we only want the current value here.
+  const [inputValue] = useDataflowInput(isInput ? name : "");
   const liveValue = useDataflowValue(isInput ? "" : name);
 
   return (
