@@ -13,7 +13,7 @@ import {
   useDataflowValuesSnapshot,
   type VarUpdate,
 } from "./dataflow";
-import { Inspect, InspectorProvider } from "./inspector";
+import { Inspectable, InspectorProvider } from "./inspector";
 
 export function App() {
   // Drive autoRun from React state so the toggle in <Inputs/> reconfigures
@@ -77,23 +77,23 @@ function Page({
           showSlow={showSlow}
           onToggleSlow={onToggleSlow}
         />
-        <Inspect label="Stats card">
+        <Inspectable label="Stats card">
           <Stats />
-        </Inspect>
-        <Inspect label="Notif result">
+        </Inspectable>
+        <Inspectable label="Notif result">
           <NotifResult />
-        </Inspect>
+        </Inspectable>
         {showSlow && (
-          <Inspect label="Slow threshold">
+          <Inspectable label="Slow threshold">
             <SlowThreshold />
-          </Inspect>
+          </Inspectable>
         )}
-        <Inspect label="Histogram">
+        <Inspectable label="Histogram">
           <Histogram />
-        </Inspect>
-        <Inspect label="Filtered table">
+        </Inspectable>
+        <Inspectable label="Filtered table">
           <Table />
-        </Inspect>
+        </Inspectable>
       </div>
 
       <DepsExplorer />

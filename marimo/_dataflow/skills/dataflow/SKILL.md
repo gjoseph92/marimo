@@ -422,20 +422,19 @@ needed.
 ## Hover-to-debug overlay (optional `inspector.tsx`)
 
 For richer in-app debugging — a hover popover that shows the pruned
-subgraph behind any component, per-variable arrival timing, and a rich
-value preview — there's a companion `inspector.tsx` you can vendor
-alongside the client:
+subgraph behind any component and a rich value preview — there's a
+companion `inspector.tsx` you can vendor alongside the client:
 
 ```bash
 marimo dataflow inspector > src/inspector.tsx
 ```
 
-It's strictly opt-in; the client adds zero overhead until you mount
+It's strictly opt-in; the base client adds no overhead until you mount
 `<InspectorProvider>`.
 
 ```tsx
 import { DataflowProvider } from "./dataflow";
-import { Inspect, InspectorProvider } from "./inspector";
+import { Inspectable, InspectorProvider } from "./inspector";
 
 function App() {
   const [debug, setDebug] = useState(false);
@@ -446,34 +445,38 @@ function App() {
           <input type="checkbox" onChange={(e) => setDebug(e.target.checked)} />
           Inspect mode
         </label>
-        <Inspect label="Stats card">
+        <Inspectable label="Stats card">
           <StatsCard />
-        </Inspect>
+        </Inspectable>
       </InspectorProvider>
     </DataflowProvider>
   );
 }
 ```
 
-The wrapping `<Inspect>` discovers which dataflow variables its subtree
-reads by listening on a `InspectorTrackerContext` that the existing
-hooks register with on each render — no manual variable list needed
-unless you want to override (`<Inspect vars={["stats"]}>`).
+`<Inspectable>` discovers which dataflow variables its subtree reads
+by listening on a `InspectorTrackerContext` that the existing hooks
+register with on each render — no manual variable list needed unless
+you want to pin a stable surface (`<Inspectable vars={["stats"]}>`).
 
-When inspect mode is on, hovering any wrapped region shows a popover
-with:
+The popover is anchored to the inspectable region's bounding box (not
+the cursor), so hover stays cheap and the panel doesn't dart around
+while you reach for it. **Click an inspectable region to pin the
+popover; click anywhere outside (page background or another region)
+to unpin.** Click the same region again to toggle off.
 
-- A pruned mini-DAG of the variables the region reads, plus their full
-  ancestor closure (sources at the top, leaves at the bottom).
-- A per-row mini-waterfall using `VarUpdate.ts - status.runStartedAtWall`
-  to show arrival time relative to run start.
-- A rich preview pane on the right that dispatches on the variable's
-  `Kind` — tables render as tables, dicts as a collapsible JSON tree,
+Inside the popover:
+
+- A compact SVG mini-DAG of the variables the region reads plus their
+  full ancestor closure (sources at the top, sinks at the bottom).
+  Selecting a node bolds it and draws L-shaped connections to its
+  direct parents and children, fading unrelated nodes.
+- A rich preview pane that dispatches on the variable's `Kind` —
+  tables render as HTML tables, dicts as a collapsible JSON tree,
   images as `<img>`, scalars inline.
-- Click any DAG node to pin its preview; click a wrapped region to pin
-  the whole popover; click outside to unpin. Pinning a previously
-  unsubscribed variable transparently calls `useDataflowValue(name)`,
-  so the next `/run` includes it and the value streams in.
+- Inputs render their bound value via `useDataflowInput`; outputs
+  stream via `useDataflowValue`. Pinning a previously unsubscribed
+  variable transparently subscribes so the next `/run` includes it.
 
 ## Pitfalls
 
