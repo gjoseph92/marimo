@@ -51,6 +51,13 @@ def infer_kind(value: Any) -> Kind:
 
 _TABLE_SAMPLE_SIZE = 16
 
+# Row cap for table-shaped values serialized as JSON. The JSON channel
+# is the streaming preview path — sending more rows than the client
+# can display just wastes wire bytes and forces the producer to
+# materialize the full table on every update. Use the ``arrow_ipc``
+# encoding instead when you need the full payload.
+JSON_TABLE_ROW_LIMIT = 100
+
 
 def _is_table_like(value: Any) -> bool:
     """True for DataFrame-style objects from common Python data libraries.
@@ -110,18 +117,27 @@ def _to_json(value: Any) -> Any:
     type_name = type(value).__name__
     module = type(value).__module__
 
+    # All table-shaped values get capped at JSON_TABLE_ROW_LIMIT — the
+    # JSON channel is the preview path and full materialization on
+    # every update is the surprise we explicitly don't want here.
+    n = JSON_TABLE_ROW_LIMIT
     if module.startswith("pandas") and type_name == "DataFrame":
-        return value.to_dict(orient="records")
+        return value.head(n).to_dict(orient="records")
     if module.startswith("polars") and type_name == "DataFrame":
-        return value.to_dicts()
+        return value.head(n).to_dicts()
     if module.startswith("polars") and type_name == "LazyFrame":
-        return value.collect().to_dicts()
+        # ``head`` on a LazyFrame is a query rewrite, so the limit
+        # pushes down — we never collect the full plan.
+        return value.head(n).collect().to_dicts()
     if module.startswith("pyarrow") and type_name in ("Table", "RecordBatch"):
-        return value.to_pylist()
+        # ``slice`` on Arrow is zero-copy and bounded by ``n``.
+        return value.slice(0, n).to_pylist()
     if type_name == "DuckDBPyRelation":
-        # ``fetchall`` returns row tuples; pair them with column names so
-        # the client gets the JSON-records shape it expects.
-        return [dict(zip(value.columns, row)) for row in value.fetchall()]
+        # ``limit`` is a relational rewrite; the engine never produces
+        # the rows past ``n``. Pair each row tuple with the column
+        # names so the client gets the JSON-records shape it expects.
+        limited = value.limit(n)
+        return [dict(zip(limited.columns, row)) for row in limited.fetchall()]
 
     if type_name == "ndarray" and module.startswith("numpy"):
         return value.tolist()
