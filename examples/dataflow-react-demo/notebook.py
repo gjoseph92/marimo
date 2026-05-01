@@ -34,7 +34,7 @@ def inputs():
 
 
 @app.cell
-def load_data(category, threshold):
+def load_data():
     """Simulate loading and filtering data based on inputs."""
     import random
 
@@ -47,7 +47,11 @@ def load_data(category, threshold):
         }
         for i in range(50)
     ]
+    return (raw_data,)
 
+
+@app.cell
+def _(category, raw_data, threshold):
     filtered = [row for row in raw_data if row["value"] >= threshold.value]
     if category.value != "all":
         filtered = [
