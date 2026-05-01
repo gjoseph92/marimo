@@ -565,8 +565,8 @@ const NODE_HEIGHT = 24;
 // nodes look like siblings.
 const ROW_GAP = 4;
 const LEVEL_GAP = 18;
-const COL_GAP = 5;
-const MERGE_GAP = 3;
+const COL_GAP = 12;
+const MERGE_GAP = 6;
 // Radius for rounded corners where edge segments turn.
 const CORNER_RADIUS = 3;
 const PADDING_X = 12;
