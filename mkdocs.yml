@@ -94,6 +94,7 @@ nav:
           - SQL: guides/working_with_data/sql.md
           - Plotting: guides/working_with_data/plotting.md
           - Remote Storage: guides/working_with_data/remote_storage.md
+          - Reactive databases: guides/reactive_databases.md
       - Migrate from Jupyter: guides/coming_from/jupyter.md
       - Expensive notebooks: guides/expensive_notebooks.md
       - Understanding errors:
@@ -134,6 +135,8 @@ nav:
       - Using your own editor: guides/editor_features/watching.md
       - Run notebooks as apps: guides/apps.md
       - Run notebooks as scripts: guides/scripts.md
+      - Build notebooks: guides/building.md
+      - Run as a dataflow API (experimental): guides/dataflow_api.md
       - Reuse functions and classes: guides/reusing_functions.md
       - Run in the cloud with molab: guides/molab.md
       - Export to other formats:
@@ -291,6 +294,7 @@ nav:
       - App: api/app.md
       - Cell: api/cell.md
       - Watch: api/watch.md
+      - Database: api/db.md
       - Miscellaneous: api/miscellaneous.md
   - Commands: cli.md
   - FAQ: faq.md

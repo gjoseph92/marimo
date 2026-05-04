@@ -26,6 +26,7 @@ __all__ = [  # noqa: RUF022
     "current_thread",
     # Other namespaces
     "ai",
+    "db",
     "ui",
     "islands",
     # Application elements
@@ -88,11 +89,14 @@ __all__ = [  # noqa: RUF022
     "vstack",
     "watch",
     "__version__",
+    "api",
 ]
 import marimo._ai as ai
+import marimo._db as db
 import marimo._islands as islands
 from marimo._ast.app import App
 from marimo._ast.cell import Cell
+from marimo._dataflow import api
 from marimo._islands._island_generator import MarimoIslandGenerator
 from marimo._output.doc import doc
 from marimo._output.formatting import as_html, iframe, plain

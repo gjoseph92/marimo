@@ -809,6 +809,123 @@ class NotebookDocumentTransactionNotification(
     transaction: Transaction
 
 
+# A loose schema for the per-event payload carried by ``BuildEvent``.
+# We deliberately do *not* introduce one msgspec type per event kind:
+# the build pipeline is the only producer, and the editor's Build
+# panel deserializes these straight into TypeScript fields. Keeping
+# the wire shape as a free-form dict keeps the kernel-side code
+# small and lets us add fields without an op-version bump.
+BuildEventPayload = dict[str, Any]
+
+
+class BuildEventNotification(Notification, tag="build-event"):
+    """Streaming progress for an in-flight ``marimo build`` run.
+
+    A single build emits many of these in sequence: phase boundaries,
+    one per cell as it executes, and a terminal ``done`` / ``error``
+    / ``cancelled`` event.
+
+    Attributes:
+        build_id: Identifies the build this event belongs to. Multiple
+            builds can theoretically interleave (e.g. user starts one,
+            cancels it, starts another); the frontend uses this to
+            ignore late events from a previous build.
+        event_type: The event kind (``phase_started``, ``cell_executed``, ...).
+            Mirrors :class:`marimo._build.events.BuildProgressEvent`.
+        payload: Event-specific fields (cell_id, name, phase, etc).
+    """
+
+    name: ClassVar[str] = "build-event"
+    build_id: str
+    event_type: str
+    payload: BuildEventPayload
+
+
+class DataflowSchemaNotification(Notification, tag="dataflow-schema"):
+    """Snapshot of the dataflow API's input/output/trigger contract.
+
+    Broadcast once after the initial reactive run, then again whenever the
+    materialized set of ``mo.api.input`` UI elements changes (e.g. a
+    dropdown's options recompute from upstream data). The wire shape is
+    schema-versioned via ``schema_id``; consumers cache by id.
+
+    The payload is the ``DataflowSchema`` defined in
+    ``marimo._dataflow.protocol`` re-encoded to a plain dict here so the
+    notification module avoids importing the dataflow package.
+
+    Attributes:
+        schema: Full ``DataflowSchema`` payload as a dict (the public
+            wire shape — does not include UI element ids).
+        schema_id: Stable identifier for this schema version.
+        input_object_ids: Internal map of input variable name to
+            ``UIElement.object_id``. Used by the dataflow API server to
+            translate name-keyed wire requests into the kernel's
+            id-keyed ``UpdateUIElementCommand``. Not surfaced to clients.
+    """
+
+    name: ClassVar[str] = "dataflow-schema"
+    schema: dict[str, Any]
+    schema_id: str
+    input_object_ids: dict[str, str] = msgspec.field(default_factory=dict)
+
+
+class DataflowVarNotification(Notification, tag="dataflow-var"):
+    """Serialized value of a subscribed variable after a run.
+
+    Emitted by the kernel's dataflow extension at the end of each run for
+    every variable that at least one consumer has subscribed to. The
+    ``consumer_id`` field lets each consumer filter the broadcast stream
+    to events meant for it without per-recipient routing in ``Room``.
+
+    Attributes:
+        consumer_id: Target consumer's id; consumers ignore events whose
+            ``consumer_id`` doesn't match their own.
+        run_id: Identifier of the run that produced this value.
+        seq: Monotonic sequence number within the run, for ordering.
+        name: Variable name.
+        kind: ``Kind`` string from ``marimo._dataflow.protocol`` (e.g.
+            ``"integer"``, ``"table"``, ``"ui_element"``).
+        encoding: Wire encoding selected for this value (e.g. ``"json"``,
+            ``"arrow_ipc"``).
+        value: Inline value if small enough; otherwise None and ``ref``
+            holds a blob URL.
+        ref: Optional URL for out-of-band payloads.
+    """
+
+    name: ClassVar[str] = "dataflow-var"
+    consumer_id: str
+    run_id: str
+    seq: int
+    var_name: str
+    kind: str
+    encoding: str
+    value: Any | None = None
+    ref: str | None = None
+
+
+class DataflowVarErrorNotification(Notification, tag="dataflow-var-error"):
+    """A subscribed variable failed to produce a value this run.
+
+    Emitted in two cases: a cell that defines a subscribed variable raised
+    an exception, or the run completed without ever defining the variable
+    (graph misalignment with the subscription).
+
+    Attributes:
+        consumer_id: Target consumer's id.
+        run_id: Identifier of the run.
+        var_name: The subscribed variable that did not materialize.
+        error: One-line error message.
+        traceback: Optional formatted traceback.
+    """
+
+    name: ClassVar[str] = "dataflow-var-error"
+    consumer_id: str
+    run_id: str
+    var_name: str
+    error: str
+    traceback: str | None = None
+
+
 NotificationMessage = (
     # Cell operations
     CellNotification
@@ -860,4 +977,10 @@ NotificationMessage = (
     | FocusCellNotification
     # Document
     | NotebookDocumentTransactionNotification
+    # Build
+    | BuildEventNotification
+    # Dataflow API
+    | DataflowSchemaNotification
+    | DataflowVarNotification
+    | DataflowVarErrorNotification
 )

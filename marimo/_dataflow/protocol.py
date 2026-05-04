@@ -1,0 +1,188 @@
+# Copyright 2026 Marimo. All rights reserved.
+"""Dataflow wire protocol — the closed event union and schema types.
+
+This module is deliberately separate from marimo._messaging.notification.
+The two protocols have different consumers, lifecycles, and stability
+guarantees. This one is meant to be implementable in ~200 lines by any
+language.
+"""
+
+from __future__ import annotations
+
+from enum import Enum
+from typing import Any, Literal
+
+import msgspec
+
+# ---------------------------------------------------------------------------
+# Kind — closed type system for variables
+# ---------------------------------------------------------------------------
+
+
+class Kind(str, Enum):
+    """Closed set of logical types for dataflow variables."""
+
+    NULL = "null"
+    BOOLEAN = "boolean"
+    INTEGER = "integer"
+    NUMBER = "number"
+    STRING = "string"
+    BYTES = "bytes"
+    DATETIME = "datetime"
+    DATE = "date"
+    TIME = "time"
+    DURATION = "duration"
+    LIST = "list"
+    DICT = "dict"
+    TUPLE = "tuple"
+    OPTIONAL = "optional"
+    UNION = "union"
+    TABLE = "table"
+    TENSOR = "tensor"
+    IMAGE = "image"
+    AUDIO = "audio"
+    VIDEO = "video"
+    HTML = "html"
+    PDF = "pdf"
+    UI_ELEMENT = "ui_element"
+    ANY = "any"
+
+
+# ---------------------------------------------------------------------------
+# Schema types
+# ---------------------------------------------------------------------------
+
+
+class VarView(msgspec.Struct, rename="camel"):
+    """Per-variable rendering hints applied when serializing the variable.
+
+    Sent by clients on ``POST /run`` (in ``views: {var_name: VarView}``) to
+    shape the serialized payload for that variable. The server applies the
+    hints during JSON serialization; ``arrow_ipc`` ignores them today.
+
+    Attributes:
+        row_limit: Maximum rows to include for table-shaped values. ``None``
+            means "no truncation" — return every row. The serializer pushes
+            this down where the engine supports it (polars LazyFrame,
+            DuckDB), so a slim ``row_limit`` on a huge frame doesn't
+            materialize the whole table server-side.
+        row_offset: Skip the first ``row_offset`` rows. Combined with
+            ``row_limit`` this gives the caller stateless pagination.
+            Ignored when ``row_limit`` is ``None`` and ``row_offset`` is 0.
+    """
+
+    row_limit: int | None = None
+    row_offset: int = 0
+
+
+class InputSchema(msgspec.Struct, rename="camel"):
+    """Describes one input to the dataflow graph."""
+
+    name: str
+    kind: Kind = Kind.ANY
+    default: Any | None = None
+    description: str | None = None
+    required: bool = True
+    # Kind-specific constraints (min, max, options, arrow_schema_b64, etc.)
+    constraints: dict[str, Any] | None = None
+
+
+class OutputSchema(msgspec.Struct, rename="camel"):
+    """Describes one output variable."""
+
+    name: str
+    kind: Kind = Kind.ANY
+    description: str | None = None
+    # Wire encodings the server can produce for this variable
+    accepts: list[str] | None = None
+
+
+class DataflowSchema(msgspec.Struct, rename="camel"):
+    """Full schema for a dataflow-mode notebook.
+
+    Side-effect cells (write-to-db, send-email, etc.) are not a separate
+    schema slot. They show up as inputs whose ``constraints.ui`` is
+    ``"run_button"`` paired with cells that read those buttons and gate
+    on ``mo.stop(not button.value)``. See the dataflow API guide for the
+    canonical pattern.
+
+    ``graph`` is a variable-level dependency map: each key is the name of
+    a variable in ``inputs`` or ``outputs``, and each value is the sorted
+    list of variables (also in ``inputs`` or ``outputs``) that the cell
+    defining the key reads. Inputs always map to ``[]``. Clients can use
+    it to compute ancestors/descendants for debug popovers, fire focused
+    ``/run`` requests, or render a mini-DAG; the server doesn't need any
+    extra endpoints.
+    """
+
+    inputs: list[InputSchema]
+    outputs: list[OutputSchema]
+    schema_id: str
+    graph: dict[str, list[str]] = msgspec.field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
+# Events — the outbound SSE union
+# ---------------------------------------------------------------------------
+
+
+class SchemaEvent(msgspec.Struct, tag="schema", tag_field="type"):
+    schema: DataflowSchema
+    schema_id: str
+
+
+class SchemaChangedEvent(
+    msgspec.Struct, tag="schema-changed", tag_field="type"
+):
+    schema_id: str
+
+
+class RunEvent(msgspec.Struct, tag="run", tag_field="type"):
+    run_id: str
+    status: Literal["started", "done"]
+    elapsed_ms: float | None = None
+
+
+class SupersededEvent(msgspec.Struct, tag="superseded", tag_field="type"):
+    run_id: str
+
+
+class VarEvent(msgspec.Struct, tag="var", tag_field="type"):
+    name: str
+    kind: Kind
+    encoding: str
+    run_id: str
+    seq: int
+    value: Any | None = None
+    ref: str | None = None
+
+
+class VarErrorEvent(msgspec.Struct, tag="var-error", tag_field="type"):
+    name: str
+    run_id: str
+    error: str
+    traceback: str | None = None
+
+
+class HeartbeatEvent(msgspec.Struct, tag="heartbeat", tag_field="type"):
+    timestamp: float
+
+
+DataflowEvent = (
+    SchemaEvent
+    | SchemaChangedEvent
+    | RunEvent
+    | SupersededEvent
+    | VarEvent
+    | VarErrorEvent
+    | HeartbeatEvent
+)
+
+
+# Encoder for SSE serialization
+_encoder = msgspec.json.Encoder()
+
+
+def encode_event(event: DataflowEvent) -> bytes:
+    """Serialize a DataflowEvent to JSON bytes."""
+    return _encoder.encode(event)
