@@ -124,6 +124,39 @@ function Stats() {
 }
 ```
 
+### 5. Paginating tables (optional)
+
+The server has no implicit row cap — subscribing to a 1M-row dataframe
+delivers 1M rows. For preview UIs, ask for a window via `useDataflowView`:
+
+```tsx
+import { useDataflowValue, useDataflowView } from "./dataflow";
+
+function FilteredPreview() {
+  const [page, setPage] = useState(0);
+  // Lifetime-managed: the hint is sent on every /run while this
+  // component is mounted, and cleared on unmount.
+  useDataflowView("filtered", { rowLimit: 100, rowOffset: page * 100 });
+  const rows = useDataflowValue<Record<string, unknown>[]>("filtered");
+  return (
+    <>
+      <button onClick={() => setPage((p) => p + 1)}>next</button>
+      <pre>{JSON.stringify(rows, null, 2)}</pre>
+    </>
+  );
+}
+```
+
+Bounds push down through polars `LazyFrame` and DuckDB plans, so a slim
+`rowLimit` on a huge frame never materializes the full table server-side.
+
+`useDataflowView` registers a hint on the underlying client (one per
+`<DataflowProvider>`), so a single var has a single window per app.
+If a debug component asks for `{rowLimit: 100}` and a preview asks for the
+full frame, last writer wins — coordinate at the app level. Spin up a
+second `<DataflowProvider>` (separate fetch / consumer) if two parts of
+the same UI genuinely need different windows of the same variable.
+
 ### 5. Configure your dev server proxy
 
 Vite example:
@@ -321,13 +354,24 @@ Request:
 ```json
 {
   "inputs":    {"threshold": 50, "category": "A"},
-  "subscribe": ["stats"]
+  "subscribe": ["stats", "filtered"],
+  "views":     {"filtered": {"rowLimit": 100, "rowOffset": 0}}
 }
 ```
 
 If `subscribe` is empty the server defaults to *all* outputs. Subscribing to
 a strict subset enables graph pruning: the kernel runs only the cells that
 feed the subscribed outputs.
+
+`views` is an optional per-variable hint applied during JSON serialization.
+Today it shapes table-shaped variables only (`rowLimit` + `rowOffset`).
+**Important**: the server has *no* implicit row cap — if you don't pass
+a `rowLimit` for a tabular variable, it serializes the whole frame. For
+preview-shaped UIs (debug pop-overs, the inspector, dashboard tiles) ask
+explicitly. Pagination is stateless: bump `rowOffset` by `rowLimit` between
+calls. The bounds push down through polars `LazyFrame` and DuckDB plans, so
+a slim `rowLimit` on a huge frame doesn't materialize the whole table
+server-side.
 
 Response: `text/event-stream` with the closed event union:
 

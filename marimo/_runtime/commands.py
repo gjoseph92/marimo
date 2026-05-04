@@ -900,10 +900,13 @@ class SetDataflowSubscriptionsCommand(Command):
     Attributes:
         consumer_id: Identifier of the dataflow SSE consumer.
         subscribed: Variable names this consumer wants updates for.
+        views: Per-variable rendering hints (row limit, offset, ...). Keyed
+            by variable name; absent = no hint, full payload.
     """
 
     consumer_id: str
     subscribed: list[str]
+    views: dict[str, dict[str, Any]] = msgspec.field(default_factory=dict)
 
 
 class RemoveDataflowSubscriptionsCommand(Command):
@@ -957,6 +960,12 @@ class ScopedRunCommand(Command):
     subscribed: list[str]
     prune: bool = False
     request: HTTPRequest | None = None
+    # Per-variable rendering hints applied during serialization (row limit,
+    # offset, ...). Keyed by variable name; absent = no hint, full payload.
+    # ``dict[str, Any]`` because ``protocol.VarView`` is a wire struct that
+    # the kernel layer doesn't import directly — the host bundle decodes it
+    # to a plain dict before issuing the command.
+    views: dict[str, dict[str, Any]] = msgspec.field(default_factory=dict)
 
 
 CommandMessage = (

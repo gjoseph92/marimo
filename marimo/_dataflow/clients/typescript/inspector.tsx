@@ -1129,23 +1129,19 @@ function isArrayOfRecords(v: unknown): v is Record<string, unknown>[] {
   );
 }
 
-// Mirror of ``JSON_TABLE_ROW_LIMIT`` in ``marimo/_dataflow/serialize.py``.
-// The server head()s tables to this many rows before serializing — there
-// is no full count to compare against, so the inspector renders exactly
-// what the wire delivered and hedges the footer language accordingly.
-const SERVER_TABLE_ROW_CAP = 100;
-
 function TablePreview({ rows }: { rows: Record<string, unknown>[] }) {
   const cols = useMemo(() => {
     const seen = new Set<string>();
     for (const r of rows) for (const k of Object.keys(r)) seen.add(k);
     return Array.from(seen);
   }, [rows]);
-  // The server may have truncated, but it never tells us the true row count
-  // (computing it can be slow on remote/lazy frames). When we get exactly
-  // the cap back we *probably* truncated; otherwise we definitely got the
-  // whole frame. The label avoids claiming a total we don't actually have.
-  const possiblyTruncated = rows.length >= SERVER_TABLE_ROW_CAP;
+  // The wire delivers exactly what the caller asked for via ``views`` (or
+  // the full frame if they didn't ask). The inspector doesn't try to
+  // hedge with a "first N of M" footer because the true row count isn't
+  // on the wire — computing it on a remote / lazy frame is exactly the
+  // surprise we'd be hiding behind nice-looking pagination. The pop-out
+  // simply renders whatever rows arrived; callers wanting a small preview
+  // pass ``rowLimit`` for that variable in their ``/run`` request.
   return (
     <div style={styles.tableWrap}>
       <table style={styles.table}>
@@ -1170,11 +1166,6 @@ function TablePreview({ rows }: { rows: Record<string, unknown>[] }) {
           ))}
         </tbody>
       </table>
-      {possiblyTruncated && (
-        <p style={styles.placeholder}>
-          showing first {rows.length} rows
-        </p>
-      )}
     </div>
   );
 }

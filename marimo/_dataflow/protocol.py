@@ -53,6 +53,28 @@ class Kind(str, Enum):
 # ---------------------------------------------------------------------------
 
 
+class VarView(msgspec.Struct, rename="camel"):
+    """Per-variable rendering hints applied when serializing the variable.
+
+    Sent by clients on ``POST /run`` (in ``views: {var_name: VarView}``) to
+    shape the serialized payload for that variable. The server applies the
+    hints during JSON serialization; ``arrow_ipc`` ignores them today.
+
+    Attributes:
+        row_limit: Maximum rows to include for table-shaped values. ``None``
+            means "no truncation" — return every row. The serializer pushes
+            this down where the engine supports it (polars LazyFrame,
+            DuckDB), so a slim ``row_limit`` on a huge frame doesn't
+            materialize the whole table server-side.
+        row_offset: Skip the first ``row_offset`` rows. Combined with
+            ``row_limit`` this gives the caller stateless pagination.
+            Ignored when ``row_limit`` is ``None`` and ``row_offset`` is 0.
+    """
+
+    row_limit: int | None = None
+    row_offset: int = 0
+
+
 class InputSchema(msgspec.Struct, rename="camel"):
     """Describes one input to the dataflow graph."""
 
