@@ -26,6 +26,7 @@ __all__ = [  # noqa: RUF022
     "current_thread",
     # Other namespaces
     "ai",
+    "db",
     "ui",
     "islands",
     # Application elements
@@ -91,6 +92,7 @@ __all__ = [  # noqa: RUF022
     "api",
 ]
 import marimo._ai as ai
+import marimo._db as db
 import marimo._islands as islands
 from marimo._ast.app import App
 from marimo._ast.cell import Cell
