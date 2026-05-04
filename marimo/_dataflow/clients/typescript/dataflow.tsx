@@ -442,17 +442,22 @@ export class DataflowClient {
   /**
    * One-shot snapshot of a single variable, scoped to its own consumer.
    *
-   * Fires ``POST /run`` with ``inputs={}`` (the kernel treats that as a
-   * subscription refresh — no cell re-execution) and ``views`` set on
-   * the requested variable only. Because it's a fresh consumer the
-   * server applies the view to *this* request's response without
-   * touching the main client's subscriptions or views — which is the
-   * whole point: previewing a paginated slice for the inspector must
-   * not change what the inspected component is rendering.
+   * Fires ``POST /run`` with the **full current ``inputs`` map** plus
+   * ``subscribe=[name]`` and a per-var ``view``. Sending all inputs
+   * (not just the ones that changed) is what keeps the dataflow API
+   * stateless: a load balancer can route the same request to any
+   * backend instance and get the same answer, regardless of what
+   * earlier requests that instance has seen.
    *
-   * Returns the deserialized value once it arrives, or ``undefined`` if
-   * the kernel reports a per-variable error (e.g. ``mo.stop``'d cell).
-   * Rejects only on transport / protocol failures.
+   * Because it's a fresh consumer the server scopes the response and
+   * the view to *this* request without touching the main client's
+   * subscriptions — which is the whole point: previewing a paginated
+   * slice for the inspector must not change what the inspected
+   * component is rendering.
+   *
+   * Returns the deserialized value once it arrives, or ``undefined``
+   * if the kernel reports a per-variable error (e.g. ``mo.stop``'d
+   * cell). Rejects only on transport / protocol failures.
    */
   async previewVar<T = unknown>(
     name: string,
@@ -460,8 +465,10 @@ export class DataflowClient {
     signal?: AbortSignal,
   ): Promise<T | undefined> {
     if (!name) return undefined;
+    const inputs: Record<string, unknown> = {};
+    for (const [k, v] of this.inputs) inputs[k] = v;
     const body = JSON.stringify({
-      inputs: {},
+      inputs,
       subscribe: [name],
       views: view ? { [name]: view } : undefined,
     });
@@ -990,29 +997,19 @@ export function useDataflowPreview<T = unknown>(
   const [value, setValue] = useState<T | undefined>(undefined);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Bump to force a refresh; ``refresh()`` increments this and the
-  // effect re-fires.
+  // ``refresh()`` bumps this; the fetch effect lists it in its deps so
+  // imperative refresh works alongside the run-id-driven auto-refresh.
   const [tick, setTick] = useState(0);
   const refresh = useCallback(() => setTick((n) => n + 1), []);
 
-  // Re-fire whenever the main client completes a run so the preview
-  // reflects the same kernel state the inspected component now shows.
-  // Subscribing to status (rather than the var directly) avoids
-  // refcount-bumping the main subscription set.
+  // The main client's run id is the trigger for "kernel state changed —
+  // re-snapshot." We only fetch when the run is *settled*: an in-flight
+  // run would either give us a stale snapshot (kernel still mid-cycle)
+  // or queue behind a pending input. ``status.loading`` acts as that
+  // gate. Subscribing to status (rather than the var) avoids
+  // refcount-bumping the main subscription set, which would defeat the
+  // whole point of keeping the inspector preview off the main channel.
   const status = useDataflowStatus();
-  const lastRunId = useRef<string | null>(null);
-  useEffect(() => {
-    if (!status.loading && status.runId && status.runId !== lastRunId.current) {
-      lastRunId.current = status.runId;
-      // Skip the very first run of a session — the mount-driven fetch
-      // below will catch it and we don't want a double-fire.
-      if (tick > 0) refresh();
-    }
-    // ``tick`` is intentionally read but not depended-on (we only want
-    // to forward the run-id transition, not re-run when ``tick``
-    // changes — the effect below already handles that).
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [status.runId, status.loading, refresh]);
 
   // Stable hash of the view so a fresh ``{rowLimit:50}`` literal each
   // render doesn't refetch. ``null``/``undefined`` collapse to "no
@@ -1028,6 +1025,9 @@ export function useDataflowPreview<T = unknown>(
       setError(null);
       return;
     }
+    // Don't snapshot mid-run — wait for the kernel to settle. The
+    // effect re-fires when ``status.loading`` flips back to ``false``.
+    if (status.loading) return;
     const ctl = new AbortController();
     setLoading(true);
     setError(null);
@@ -1048,7 +1048,7 @@ export function useDataflowPreview<T = unknown>(
     // would refetch on every render of a parent that builds a fresh
     // ``{rowLimit, rowOffset}`` object.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [client, name, viewKey, tick]);
+  }, [client, name, viewKey, tick, status.runId, status.loading]);
 
   return { value, loading, error, refresh };
 }
