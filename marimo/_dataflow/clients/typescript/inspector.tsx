@@ -1148,13 +1148,14 @@ const PREVIEW_PAGE_SIZE = 50;
 /**
  * Paginated table preview backed by ``useDataflowPreview``.
  *
- * Each page is fetched as a separate, scoped ``/run`` request: the
- * server applies a ``rowLimit`` + ``rowOffset`` view to *that* request
- * only, so the popover gets a cheap slice of the full frame without
- * altering what the inspected component renders. The kernel treats
- * ``inputs={}`` as a snapshot (no cell re-execution), and pagination
- * pushes down through polars LazyFrame / DuckDB plans, so a slim window
- * on a huge table never materializes the whole thing server-side.
+ * Each page is fetched as a separate, scoped ``/run`` request that
+ * carries the *current* inputs (so any backend instance can serve it
+ * — the dataflow API is stateless) plus a ``rowLimit`` + ``rowOffset``
+ * view scoped to this consumer only, so the popover gets a cheap slice
+ * of the full frame without altering what the inspected component
+ * renders. Pagination pushes down through polars LazyFrame / DuckDB
+ * plans, so a slim window on a huge table never materializes the whole
+ * thing server-side.
  */
 function PaginatedTablePreview({ name }: { name: string }) {
   const [page, setPage] = useState(0);
@@ -1186,6 +1187,8 @@ function PaginatedTablePreview({ name }: { name: string }) {
         ? "no rows"
         : `no more rows`
       : `rows ${start + 1}–${start + rows.length}`;
+  const prevDisabled = page === 0 || loading;
+  const nextDisabled = !hasMore || loading;
   return (
     <>
       <TablePreview rows={rows} />
@@ -1193,8 +1196,12 @@ function PaginatedTablePreview({ name }: { name: string }) {
         <button
           type="button"
           onClick={() => setPage((p) => Math.max(0, p - 1))}
-          disabled={page === 0 || loading}
-          style={styles.paginationBtn}
+          disabled={prevDisabled}
+          style={
+            prevDisabled
+              ? { ...styles.paginationBtn, ...styles.paginationBtnDisabled }
+              : styles.paginationBtn
+          }
           aria-label="previous page"
         >
           ←
@@ -1206,8 +1213,12 @@ function PaginatedTablePreview({ name }: { name: string }) {
         <button
           type="button"
           onClick={() => setPage((p) => p + 1)}
-          disabled={!hasMore || loading}
-          style={styles.paginationBtn}
+          disabled={nextDisabled}
+          style={
+            nextDisabled
+              ? { ...styles.paginationBtn, ...styles.paginationBtnDisabled }
+              : styles.paginationBtn
+          }
           aria-label="next page"
         >
           →
@@ -1486,6 +1497,11 @@ const styles: Record<string, CSSProperties> = {
     fontSize: 11,
     cursor: "pointer",
     color: "#495057",
+  },
+  paginationBtnDisabled: {
+    cursor: "not-allowed",
+    opacity: 0.4,
+    color: "#adb5bd",
   },
   imagePreview: { maxWidth: "100%", maxHeight: 320, borderRadius: 4 },
   htmlPreview: { fontSize: 12 },

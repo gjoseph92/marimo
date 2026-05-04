@@ -148,9 +148,12 @@ class DataflowCallbacks:
         tagged with ``request.run_id`` because we set it on the instance
         for the duration of the run.
 
-        When ``inputs`` is empty (a pure subscription refresh), no reactive
-        cells are queued and we emit values directly so the consumer still
-        gets a snapshot.
+        The dataflow API is *stateless*: the request must carry every
+        input value the caller wants applied, not just the ones that
+        changed. This handler does not special-case any subset (notably
+        empty ``inputs``) — every request is processed identically so a
+        future load balancer can route the same request to any backend
+        instance and get the same answer.
         """
         self._subscriptions[request.consumer_id] = frozenset(
             request.subscribed
