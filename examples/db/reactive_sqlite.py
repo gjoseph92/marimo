@@ -7,36 +7,31 @@
 
 import marimo
 
-__generated_with = "0.19.7"
+__generated_with = "0.23.4"
 app = marimo.App(width="medium")
 
-
-@app.cell
-def _():
+with app.setup:
+    import sqlite3
     import time
 
     import marimo as mo
 
-    return mo, time
 
+@app.cell(hide_code=True)
+def _():
+    mo.md("""
+    # Reactive SQLite
 
-@app.cell
-def _(mo):
-    mo.md(
-        """
-        # Reactive SQLite
-
-        `mo.db.attach` connects a SQLite database to marimo's reactive graph.
-        Reads through the handle re-run automatically when the database
-        changes — whether the change came from this notebook or from
-        another process.
-        """
-    )
+    `mo.db.attach` connects a SQLite database to marimo's reactive graph.
+    Reads through the handle re-run automatically when the database
+    changes — whether the change came from this notebook or from
+    another process.
+    """)
     return
 
 
 @app.cell
-def _(mo):
+def _():
     db_path = mo.notebook_dir() / "events.db"
     db = mo.db.attach(db_path)
     db.execute(
@@ -48,11 +43,11 @@ def _(mo):
         )
         """
     )
-    return (db,)
+    return db, db_path
 
 
 @app.cell
-def _(mo):
+def _():
     payload = mo.ui.text(placeholder="payload", label="Payload")
     add = mo.ui.run_button(label="Add event")
     mo.hstack([payload, add])
@@ -60,7 +55,7 @@ def _(mo):
 
 
 @app.cell
-def _(add, db, payload, time):
+def _(add, db, payload):
     if add.value and payload.value:
         db.execute(
             "INSERT INTO events(ts, payload) VALUES (?, ?)",
@@ -79,7 +74,7 @@ def _(db):
 
 
 @app.cell
-def _(mo):
+def _():
     clear = mo.ui.run_button(label="Clear all events", kind="danger")
     clear
     return (clear,)
@@ -89,6 +84,46 @@ def _(mo):
 def _(clear, db):
     if clear.value:
         db.execute("DELETE FROM events")
+    return
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md("""
+    ## External writers
+
+    The button below opens its own `sqlite3` connection and inserts a row
+    **without going through `db`**. The events table above still re-renders
+    on the next watcher tick (about a second), because `mo.db.attach`
+    polls the database file's mtime and bumps the reactive signal whenever
+    another process commits.
+    """)
+    return
+
+
+@app.cell
+def _():
+    external = mo.ui.run_button(label="Insert via raw sqlite3 (bypassing db)")
+    external
+    return (external,)
+
+
+@app.cell
+def _(db_path, external):
+    if external.value:
+        with sqlite3.connect(db_path) as _conn:
+            _conn.execute(
+                "INSERT INTO events(ts, payload) VALUES (?, ?)",
+                (time.time(), "from another process"),
+            )
+            _conn.commit()
+    return
+
+
+@app.cell
+def _(events):
+    # another view of the `query` shown here for convenience
+    events
     return
 
 
