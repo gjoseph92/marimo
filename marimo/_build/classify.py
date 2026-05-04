@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 
 # Marimo attributes that signal a cell depends on runtime input. Extend
 # this set when adding new sources of input non-determinism.
-INPUT_ATTRS: frozenset[str] = frozenset({"ui", "cli_args"})
+INPUT_ATTRS: frozenset[str] = frozenset({"ui", "cli_args", "api"})
 
 
 @dataclass(frozen=True)
