@@ -6,6 +6,7 @@ import {
   useEffect,
   useMemo,
   useRef,
+  useState,
   useSyncExternalStore,
 } from "react";
 
@@ -436,6 +437,95 @@ export class DataflowClient {
       this.debounceTimer = null;
     }
     void this.runNow();
+  }
+
+  /**
+   * One-shot snapshot of a single variable, scoped to its own consumer.
+   *
+   * Fires ``POST /run`` with ``inputs={}`` (the kernel treats that as a
+   * subscription refresh — no cell re-execution) and ``views`` set on
+   * the requested variable only. Because it's a fresh consumer the
+   * server applies the view to *this* request's response without
+   * touching the main client's subscriptions or views — which is the
+   * whole point: previewing a paginated slice for the inspector must
+   * not change what the inspected component is rendering.
+   *
+   * Returns the deserialized value once it arrives, or ``undefined`` if
+   * the kernel reports a per-variable error (e.g. ``mo.stop``'d cell).
+   * Rejects only on transport / protocol failures.
+   */
+  async previewVar<T = unknown>(
+    name: string,
+    view?: VarView,
+    signal?: AbortSignal,
+  ): Promise<T | undefined> {
+    if (!name) return undefined;
+    const body = JSON.stringify({
+      inputs: {},
+      subscribe: [name],
+      views: view ? { [name]: view } : undefined,
+    });
+    const resp = await fetch(`${this.baseUrl}/run`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "text/event-stream",
+      },
+      body,
+      signal,
+    });
+    if (!resp.ok || !resp.body) {
+      throw new Error(`preview failed: ${resp.status}`);
+    }
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    let captured: T | undefined;
+    let varError: string | null = null;
+    let done = false;
+    // Read until the run's terminal ``done`` event, then drain the body.
+    // We don't break early on the first ``var`` event because errors and
+    // ``var`` may interleave; the run-done bookend is the only point at
+    // which we know the kernel won't emit anything more for this run.
+    while (!done) {
+      const { value, done: streamDone } = await reader.read();
+      if (streamDone) break;
+      buf += decoder.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf("\n\n")) !== -1) {
+        const block = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        let event = "";
+        let data = "";
+        for (const line of block.split("\n")) {
+          if (line.startsWith("event:")) event = line.slice(6).trim();
+          else if (line.startsWith("data:")) data += line.slice(5).trim();
+        }
+        if (!data) continue;
+        let parsed: Record<string, unknown>;
+        try {
+          parsed = JSON.parse(data);
+        } catch {
+          continue;
+        }
+        if (event === "var" && parsed.name === name) {
+          captured = parsed.value as T;
+        } else if (event === "var-error" && parsed.name === name) {
+          varError = (parsed.error as string) ?? "var-error";
+        } else if (event === "run" && parsed.status === "done") {
+          done = true;
+        }
+      }
+    }
+    // ``var-error`` is a per-var concern; surface it via the returned
+    // promise's resolved value (``undefined``) so the inspector can show
+    // a placeholder rather than a thrown error. Transport failures
+    // still throw above.
+    if (varError) {
+      // eslint-disable-next-line no-console
+      console.warn(`dataflow preview ${name}: ${varError}`);
+    }
+    return captured;
   }
 
   /** Cancel any in-flight run + pending debounced run. */
@@ -871,6 +961,96 @@ export function useDataflowVariable<T = unknown>(
     () => client.getValue(name) as VarUpdate<T> | undefined,
     () => client.getValue(name) as VarUpdate<T> | undefined,
   );
+}
+
+/**
+ * One-shot snapshot of a variable scoped to its own ``/run`` consumer.
+ *
+ * Returns ``{ value, loading, error, refresh }``. Refreshes on mount,
+ * when ``view`` changes, and after every main-client run completes — so
+ * a popover or debug pane stays in sync with the user-visible state
+ * without ever subscribing through the main consumer (which would
+ * change what other components are rendering).
+ *
+ * Use this for inspector / debug previews of large variables: pass a
+ * ``rowLimit`` so the popover gets a paginated slice while the user's
+ * main component continues subscribing to the full frame. The two
+ * channels never share a view.
+ */
+export function useDataflowPreview<T = unknown>(
+  name: string,
+  view?: VarView | null,
+): {
+  value: T | undefined;
+  loading: boolean;
+  error: string | null;
+  refresh: () => void;
+} {
+  const client = useClient();
+  const [value, setValue] = useState<T | undefined>(undefined);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  // Bump to force a refresh; ``refresh()`` increments this and the
+  // effect re-fires.
+  const [tick, setTick] = useState(0);
+  const refresh = useCallback(() => setTick((n) => n + 1), []);
+
+  // Re-fire whenever the main client completes a run so the preview
+  // reflects the same kernel state the inspected component now shows.
+  // Subscribing to status (rather than the var directly) avoids
+  // refcount-bumping the main subscription set.
+  const status = useDataflowStatus();
+  const lastRunId = useRef<string | null>(null);
+  useEffect(() => {
+    if (!status.loading && status.runId && status.runId !== lastRunId.current) {
+      lastRunId.current = status.runId;
+      // Skip the very first run of a session — the mount-driven fetch
+      // below will catch it and we don't want a double-fire.
+      if (tick > 0) refresh();
+    }
+    // ``tick`` is intentionally read but not depended-on (we only want
+    // to forward the run-id transition, not re-run when ``tick``
+    // changes — the effect below already handles that).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status.runId, status.loading, refresh]);
+
+  // Stable hash of the view so a fresh ``{rowLimit:50}`` literal each
+  // render doesn't refetch. ``null``/``undefined`` collapse to "no
+  // view"; rowLimit/rowOffset are the only fields the wire honors today.
+  const viewKey = view
+    ? `${view.rowLimit ?? "∞"}:${view.rowOffset ?? 0}`
+    : "";
+
+  useEffect(() => {
+    if (!name) {
+      setValue(undefined);
+      setLoading(false);
+      setError(null);
+      return;
+    }
+    const ctl = new AbortController();
+    setLoading(true);
+    setError(null);
+    client
+      .previewVar<T>(name, view ?? undefined, ctl.signal)
+      .then((v) => {
+        if (ctl.signal.aborted) return;
+        setValue(v);
+        setLoading(false);
+      })
+      .catch((e: unknown) => {
+        if (ctl.signal.aborted) return;
+        setLoading(false);
+        setError(e instanceof Error ? e.message : String(e));
+      });
+    return () => ctl.abort();
+    // ``view`` changes flow through ``viewKey``; identity-based deps
+    // would refetch on every render of a parent that builds a fresh
+    // ``{rowLimit, rowOffset}`` object.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [client, name, viewKey, tick]);
+
+  return { value, loading, error, refresh };
 }
 
 /**

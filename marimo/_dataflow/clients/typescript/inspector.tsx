@@ -55,6 +55,7 @@ import {
   getDirectDeps,
   useDataflowGraph,
   useDataflowInput,
+  useDataflowPreview,
   useDataflowSchema,
   useDataflowValue,
   useDataflowValuesSnapshot,
@@ -1057,18 +1058,36 @@ function PreviewPanelWithSubscription({
   isInput: boolean;
   kind: Kind;
 }) {
+  // Resolve the kind from the schema so we can decide which preview
+  // strategy to use BEFORE auto-subscribing — important for tables,
+  // where we explicitly do *not* want to subscribe via the main
+  // consumer (a 1M-row dataframe would otherwise land in every
+  // user-app's value store the moment someone hovers over an
+  // inspectable region for it).
+  const schema = useDataflowSchema();
+  const schemaKind = isInput
+    ? null
+    : (schema?.outputs.find((o) => o.name === name)?.kind ?? null);
+  const isTable = !isInput && (schemaKind === "table" || kind === "table");
+
   // Inputs flow through a separate channel — read directly from the
   // input store so the preview shows the current bound value.
   // ``useDataflowInput`` returns a [value, setter] tuple (useState
   // shape); we only want the current value here.
   const [inputValue] = useDataflowInput(isInput ? name : "");
-  const liveValue = useDataflowValue(isInput ? "" : name);
+  // Auto-subscribe via the main consumer ONLY for non-table vars.
+  // Table previews go through ``useDataflowPreview`` (a separate
+  // one-shot consumer) so the popover can paginate without changing
+  // what the inspected component is rendering.
+  const liveValue = useDataflowValue(isInput || isTable ? "" : name);
 
   return (
     <div style={styles.previewBody}>
       <h4 style={styles.previewTitle}>
         {name}
-        <span style={styles.previewKind}>{isInput ? "input" : kind}</span>
+        <span style={styles.previewKind}>
+          {isInput ? "input" : (schemaKind ?? kind)}
+        </span>
       </h4>
       {isInput ? (
         inputValue === undefined ? (
@@ -1076,6 +1095,8 @@ function PreviewPanelWithSubscription({
         ) : (
           <PreviewByKind value={inputValue} kind="any" />
         )
+      ) : isTable ? (
+        <PaginatedTablePreview name={name} />
       ) : update ? (
         <PreviewByKind value={update.value} kind={update.kind} />
       ) : liveValue !== undefined ? (
@@ -1092,6 +1113,9 @@ function PreviewPanelWithSubscription({
 function PreviewByKind({ value, kind }: { value: unknown; kind: Kind }) {
   if (value == null) return <em style={styles.placeholder}>null</em>;
   if (kind === "table" || isArrayOfRecords(value)) {
+    // Reached for unknown-schema tables (e.g. the value happens to be a
+    // list-of-records but the schema's kind is "any"). The full payload
+    // is already in memory at this point, so just render it.
     return <TablePreview rows={value as Record<string, unknown>[]} />;
   }
   if (kind === "image" && typeof value === "string") {
@@ -1117,6 +1141,80 @@ function PreviewByKind({ value, kind }: { value: unknown; kind: Kind }) {
     return <pre style={styles.scalarPreview}>{String(value)}</pre>;
   }
   return <JsonTree value={value} />;
+}
+
+const PREVIEW_PAGE_SIZE = 50;
+
+/**
+ * Paginated table preview backed by ``useDataflowPreview``.
+ *
+ * Each page is fetched as a separate, scoped ``/run`` request: the
+ * server applies a ``rowLimit`` + ``rowOffset`` view to *that* request
+ * only, so the popover gets a cheap slice of the full frame without
+ * altering what the inspected component renders. The kernel treats
+ * ``inputs={}`` as a snapshot (no cell re-execution), and pagination
+ * pushes down through polars LazyFrame / DuckDB plans, so a slim window
+ * on a huge table never materializes the whole thing server-side.
+ */
+function PaginatedTablePreview({ name }: { name: string }) {
+  const [page, setPage] = useState(0);
+  const view = useMemo(
+    () => ({
+      rowLimit: PREVIEW_PAGE_SIZE,
+      rowOffset: page * PREVIEW_PAGE_SIZE,
+    }),
+    [page],
+  );
+  const { value, loading, error } = useDataflowPreview<
+    Record<string, unknown>[]
+  >(name, view);
+
+  if (error)
+    return (
+      <em style={styles.placeholder}>preview failed: {error}</em>
+    );
+  const rows = Array.isArray(value) ? value : [];
+  // Heuristic: a full page came back, so there *might* be a next one.
+  // The wire doesn't carry a truncation flag (counting rows on a remote
+  // / lazy frame can be slow), so this is the closest we can get
+  // without paying for a count() round-trip.
+  const hasMore = rows.length === PREVIEW_PAGE_SIZE;
+  const start = page * PREVIEW_PAGE_SIZE;
+  const showingRange =
+    rows.length === 0
+      ? page === 0
+        ? "no rows"
+        : `no more rows`
+      : `rows ${start + 1}–${start + rows.length}`;
+  return (
+    <>
+      <TablePreview rows={rows} />
+      <div style={styles.paginationBar}>
+        <button
+          type="button"
+          onClick={() => setPage((p) => Math.max(0, p - 1))}
+          disabled={page === 0 || loading}
+          style={styles.paginationBtn}
+          aria-label="previous page"
+        >
+          ←
+        </button>
+        <span>
+          {showingRange}
+          {loading ? " · loading…" : ""}
+        </span>
+        <button
+          type="button"
+          onClick={() => setPage((p) => p + 1)}
+          disabled={!hasMore || loading}
+          style={styles.paginationBtn}
+          aria-label="next page"
+        >
+          →
+        </button>
+      </div>
+    </>
+  );
 }
 
 function isArrayOfRecords(v: unknown): v is Record<string, unknown>[] {
@@ -1370,6 +1468,24 @@ const styles: Record<string, CSSProperties> = {
     borderBottom: "1px solid #f1f3f5",
     fontFamily: "ui-monospace, SFMono-Regular, monospace",
     fontSize: 11,
+  },
+  paginationBar: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+    padding: "4px 2px 0",
+    fontSize: 11,
+    color: "#495057",
+  },
+  paginationBtn: {
+    background: "#f1f3f5",
+    border: "1px solid #dee2e6",
+    borderRadius: 3,
+    padding: "2px 8px",
+    fontSize: 11,
+    cursor: "pointer",
+    color: "#495057",
   },
   imagePreview: { maxWidth: "100%", maxHeight: 320, borderRadius: 4 },
   htmlPreview: { fontSize: 12 },

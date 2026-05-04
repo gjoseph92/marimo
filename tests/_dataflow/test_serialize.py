@@ -124,6 +124,24 @@ def test_view_offset_only_returns_remaining_rows() -> None:
         assert out[-1]["a"] == N_ROWS - 1, label
 
 
+def test_view_paginates_top_level_list_of_records() -> None:
+    """List-of-records is reported as ``Kind.TABLE``, so it paginates too.
+
+    This is the path the inspector hits when the notebook produces a
+    plain ``list[dict]`` rather than a real DataFrame. Without it, the
+    inspector's per-page fetch would fall through to the generic list
+    branch and silently ignore ``rowLimit`` / ``rowOffset``.
+    """
+    rows = [{"i": i} for i in range(N_ROWS)]
+    out, _ = serialize_value(
+        rows, encoding="json", view=VarView(row_limit=10, row_offset=20)
+    )
+    assert isinstance(out, list)
+    assert len(out) == 10
+    assert out[0] == {"i": 20}
+    assert out[-1] == {"i": 29}
+
+
 def test_view_does_not_paginate_nested_tables() -> None:
     """Nested tabular values inside lists/dicts aren't paginated.
 

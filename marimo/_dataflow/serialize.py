@@ -123,7 +123,11 @@ def _to_json(value: Any, view: VarView | None = None) -> Any:
     if isinstance(value, bytes):
         return base64.b64encode(value).decode("ascii")
     if isinstance(value, (list, tuple)):
-        return [_to_json(v) for v in value]
+        # ``infer_kind`` treats a list-of-records as ``TABLE``, so honor
+        # the same view semantics for it: top-level pagination, no
+        # propagation into nested elements.
+        sliced = _apply_view_sequence(value, view)
+        return [_to_json(v) for v in sliced]
     if isinstance(value, dict):
         return {str(k): _to_json(v) for k, v in value.items()}
 
@@ -169,6 +173,23 @@ def _to_json(value: Any, view: VarView | None = None) -> Any:
 # sites stay declarative and so a future "preview" hook can call into them
 # directly without duplicating the dispatch logic.
 # ---------------------------------------------------------------------------
+
+
+def _apply_view_sequence(seq: Any, view: VarView | None) -> Any:
+    """Slice a top-level list/tuple per ``view``.
+
+    Applied uniformly even when ``seq`` isn't a list-of-records — if the
+    caller passed a view, they want the prefix sliced. Plain scalar
+    lists are uncommon as subscribed values, so the over-eager case is
+    cheap.
+    """
+    if view is None or (view.row_limit is None and view.row_offset == 0):
+        return seq
+    start = view.row_offset
+    stop = (
+        start + view.row_limit if view.row_limit is not None else None
+    )
+    return seq[start:stop]
 
 
 def _apply_view_pandas(df: Any, view: VarView | None) -> Any:
