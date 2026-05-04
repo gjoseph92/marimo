@@ -94,6 +94,7 @@ nav:
           - SQL: guides/working_with_data/sql.md
           - Plotting: guides/working_with_data/plotting.md
           - Remote Storage: guides/working_with_data/remote_storage.md
+          - Reactive databases: guides/reactive_databases.md
       - Migrate from Jupyter: guides/coming_from/jupyter.md
       - Expensive notebooks: guides/expensive_notebooks.md
       - Understanding errors:
@@ -291,6 +292,7 @@ nav:
       - App: api/app.md
       - Cell: api/cell.md
       - Watch: api/watch.md
+      - Database: api/db.md
       - Miscellaneous: api/miscellaneous.md
   - Commands: cli.md
   - FAQ: faq.md
