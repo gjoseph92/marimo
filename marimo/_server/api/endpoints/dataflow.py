@@ -36,6 +36,7 @@ from marimo._dataflow.protocol import (
     SupersededEvent,
     VarErrorEvent,
     VarEvent,
+    VarView,
     encode_event,
 )
 from marimo._dataflow.session import DataflowSessionManager
@@ -65,6 +66,10 @@ class DataflowRunRequest(msgspec.Struct, rename="camel"):
     subscribe: list[str] = msgspec.field(default_factory=list)
     session_id: str | None = None
     encoding: dict[str, str] | None = None
+    # Per-variable rendering hints applied during JSON serialization.
+    # The ``arrow_ipc`` encoding ignores ``views`` — it always carries the
+    # full table.
+    views: dict[str, VarView] | None = None
 
 
 def _dataflow_manager(request: Request) -> DataflowSessionManager:
@@ -163,12 +168,19 @@ async def run_dataflow(request: Request) -> Response:
         else {o.name for o in schema.outputs}
     )
 
+    views_dict: dict[str, dict[str, Any]] = (
+        {name: msgspec.to_builtins(v) for name, v in body.views.items()}
+        if body.views
+        else {}
+    )
+
     async def event_stream() -> AsyncGenerator[str, None]:
         async for event in bundle.run(
             inputs=body.inputs,
             subscribed=subscribed,
             consumer_id=consumer_id,
             run_id=run_id,
+            views=views_dict,
             request=HTTPRequest.from_request(request),
         ):
             yield _format_sse(event)

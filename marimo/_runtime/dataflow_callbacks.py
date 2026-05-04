@@ -39,6 +39,7 @@ from marimo._types.ids import UIElementId
 if TYPE_CHECKING:
     from collections.abc import Set as AbstractSet
 
+    from marimo._dataflow.protocol import VarView
     from marimo._runtime.runtime import Kernel
 
 LOGGER = loggers.marimo_logger()
@@ -72,6 +73,12 @@ class DataflowCallbacks:
     def __init__(self, kernel: Kernel) -> None:
         self._kernel = kernel
         self._subscriptions: dict[str, frozenset[str]] = {}
+        # Per-consumer, per-variable rendering hints applied during
+        # serialization. Keyed by ``(consumer_id, var_name)`` → ``VarView``.
+        # Absent = no hint, full payload. Lives alongside ``_subscriptions``
+        # rather than on it because views get refreshed every run while the
+        # subscription set is sticky across runs.
+        self._views: dict[str, dict[str, VarView]] = {}
         # Track the most recently broadcast content-derived schema id.
         # ``compute_dataflow_schema_from_globals`` returns a fresh id keyed
         # on the input/output/trigger names, so notebook edits naturally
@@ -112,6 +119,7 @@ class DataflowCallbacks:
         self._subscriptions[request.consumer_id] = frozenset(
             request.subscribed
         )
+        self._views[request.consumer_id] = _decode_views(request.views)
         LOGGER.debug(
             "Dataflow consumer %s subscribed to %s",
             request.consumer_id,
@@ -123,6 +131,7 @@ class DataflowCallbacks:
         self, request: RemoveDataflowSubscriptionsCommand
     ) -> None:
         self._subscriptions.pop(request.consumer_id, None)
+        self._views.pop(request.consumer_id, None)
         LOGGER.debug("Dataflow consumer %s detached", request.consumer_id)
         broadcast_notification(CompletedRunNotification())
 
@@ -146,6 +155,7 @@ class DataflowCallbacks:
         self._subscriptions[request.consumer_id] = frozenset(
             request.subscribed
         )
+        self._views[request.consumer_id] = _decode_views(request.views)
 
         # The pruning scope is advisory and only honored when ``prune`` is
         # set; otherwise the kernel runs the full reactive graph (e.g. when
@@ -257,6 +267,7 @@ class DataflowCallbacks:
         glbls = self._kernel.globals
         for consumer_id, vars_ in self._subscriptions.items():
             target = vars_ if only is None else (vars_ & only)
+            consumer_views = self._views.get(consumer_id, {})
             for var_name in sorted(target):
                 self._seq += 1
                 if var_name not in glbls:
@@ -281,8 +292,11 @@ class DataflowCallbacks:
                     value = value.value
 
                 kind = infer_kind(value)
+                view = consumer_views.get(var_name)
                 try:
-                    json_value, ref = serialize_value(value, encoding="json")
+                    json_value, ref = serialize_value(
+                        value, encoding="json", view=view
+                    )
                 except Exception as exc:
                     broadcast_notification(
                         DataflowVarErrorNotification(
@@ -428,3 +442,27 @@ def _to_dict(struct: Any) -> dict[str, Any]:
     encoded = msgspec.json.encode(struct)
     decoded: dict[str, Any] = msgspec.json.decode(encoded)
     return decoded
+
+
+def _decode_views(views: dict[str, dict[str, Any]]) -> dict[str, VarView]:
+    """Convert wire-shaped per-var view dicts into ``VarView`` structs.
+
+    Done eagerly on subscription so the hot serialize path doesn't pay a
+    per-event decode cost. Unknown variable names pass through; the
+    serializer simply doesn't see them when those vars aren't produced.
+    """
+    import msgspec
+
+    from marimo._dataflow.protocol import VarView as _VarView
+
+    if not views:
+        return {}
+    out: dict[str, _VarView] = {}
+    for name, raw in views.items():
+        try:
+            out[name] = msgspec.convert(raw, type=_VarView)
+        except Exception:
+            LOGGER.exception(
+                "Ignoring malformed VarView for %r: %r", name, raw
+            )
+    return out

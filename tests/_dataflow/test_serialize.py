@@ -1,18 +1,17 @@
 # Copyright 2026 Marimo. All rights reserved.
-"""Targeted tests for ``infer_kind`` — covers the table heuristics and a
-couple of the trickier scalar cases. The exhaustive type matrix is left
-to integration tests."""
+"""Tests for ``infer_kind`` and ``serialize_value``.
+
+The serializer's table-shape pagination is the main thing under test. We
+parametrize across every supported tabular library so a future refactor
+can't quietly regress one of them.
+"""
 
 from __future__ import annotations
 
 import pytest
 
-from marimo._dataflow.protocol import Kind
-from marimo._dataflow.serialize import (
-    JSON_TABLE_ROW_LIMIT,
-    infer_kind,
-    serialize_value,
-)
+from marimo._dataflow.protocol import Kind, VarView
+from marimo._dataflow.serialize import infer_kind, serialize_value
 
 
 @pytest.mark.parametrize(
@@ -51,29 +50,92 @@ def test_infer_kind_polars_lazyframe_and_series() -> None:
     assert infer_kind(pl.Series("a", [1, 2])) is Kind.ANY
 
 
-def test_json_table_row_limit_caps_each_table_type() -> None:
-    """JSON serialization must never materialize more than the cap,
-    no matter how big the table is. Probe each library so a future
-    refactor can't quietly regress one of them."""
+N_ROWS = 250
+
+
+def _all_table_cases() -> dict[str, object]:
     pa = pytest.importorskip("pyarrow")
     pl = pytest.importorskip("polars")
     duckdb = pytest.importorskip("duckdb")
     pd = pytest.importorskip("pandas")
 
-    n_rows = JSON_TABLE_ROW_LIMIT * 5
-    rows = list(range(n_rows))
-
-    cases = {
+    rows = list(range(N_ROWS))
+    return {
         "pandas": pd.DataFrame({"a": rows}),
         "polars": pl.DataFrame({"a": rows}),
         "polars-lazy": pl.DataFrame({"a": rows}).lazy(),
         "pyarrow": pa.table({"a": rows}),
         "pyarrow-batch": pa.table({"a": rows}).to_batches()[0],
         "duckdb": duckdb.sql(
-            f"SELECT * FROM (VALUES {', '.join(f'({i})' for i in rows)}) t(a)"
+            "SELECT * FROM (VALUES "
+            + ", ".join(f"({i})" for i in rows)
+            + ") t(a)"
         ),
     }
-    for label, value in cases.items():
+
+
+def test_no_view_returns_full_table() -> None:
+    """The default — no ``view`` — must serialize every row.
+
+    The previous behavior silently truncated to a 100-row preview which
+    made the ``json`` channel useless for actual data fetching. Lock that
+    in across every supported library.
+    """
+    for label, value in _all_table_cases().items():
         out, _ = serialize_value(value, encoding="json")
         assert isinstance(out, list)
-        assert len(out) == JSON_TABLE_ROW_LIMIT, label
+        assert len(out) == N_ROWS, label
+        # First and last rows survived the round-trip.
+        assert out[0]["a"] == 0, label
+        assert out[-1]["a"] == N_ROWS - 1, label
+
+
+def test_view_row_limit_caps_each_table_type() -> None:
+    """An explicit ``rowLimit`` truncates uniformly across libraries."""
+    view = VarView(row_limit=10)
+    for label, value in _all_table_cases().items():
+        out, _ = serialize_value(value, encoding="json", view=view)
+        assert len(out) == 10, label
+        assert out[0]["a"] == 0, label
+        assert out[-1]["a"] == 9, label
+
+
+def test_view_row_offset_paginates_each_table_type() -> None:
+    """``rowOffset`` + ``rowLimit`` give callers stateless pagination."""
+    view = VarView(row_limit=10, row_offset=20)
+    for label, value in _all_table_cases().items():
+        out, _ = serialize_value(value, encoding="json", view=view)
+        assert len(out) == 10, label
+        assert out[0]["a"] == 20, label
+        assert out[-1]["a"] == 29, label
+
+
+def test_view_offset_only_returns_remaining_rows() -> None:
+    """``rowOffset`` without ``rowLimit`` skips the prefix and keeps the rest.
+
+    DuckDB uses a sentinel limit since its API requires one; the rest use
+    native open-ended slicing. Verify both paths behave the same way.
+    """
+    view = VarView(row_offset=N_ROWS - 5)
+    for label, value in _all_table_cases().items():
+        out, _ = serialize_value(value, encoding="json", view=view)
+        assert len(out) == 5, label
+        assert out[0]["a"] == N_ROWS - 5, label
+        assert out[-1]["a"] == N_ROWS - 1, label
+
+
+def test_view_does_not_paginate_nested_tables() -> None:
+    """Nested tabular values inside lists/dicts aren't paginated.
+
+    The view applies to the top-level subscribed value; nested tables
+    flow through ``_to_json`` recursion without view propagation. Lock
+    that in so the contract is "if you want pagination, subscribe to the
+    table directly."
+    """
+    pd = pytest.importorskip("pandas")
+    nested = {"frame": pd.DataFrame({"a": list(range(N_ROWS))})}
+    out, _ = serialize_value(
+        nested, encoding="json", view=VarView(row_limit=10)
+    )
+    assert isinstance(out, dict)
+    assert len(out["frame"]) == N_ROWS

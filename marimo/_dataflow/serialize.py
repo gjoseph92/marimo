@@ -4,9 +4,12 @@
 from __future__ import annotations
 
 import base64
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from marimo._dataflow.protocol import Kind
+
+if TYPE_CHECKING:
+    from marimo._dataflow.protocol import VarView
 
 
 def infer_kind(value: Any) -> Kind:
@@ -51,13 +54,6 @@ def infer_kind(value: Any) -> Kind:
 
 _TABLE_SAMPLE_SIZE = 16
 
-# Row cap for table-shaped values serialized as JSON. The JSON channel
-# is the streaming preview path — sending more rows than the client
-# can display just wastes wire bytes and forces the producer to
-# materialize the full table on every update. Use the ``arrow_ipc``
-# encoding instead when you need the full payload.
-JSON_TABLE_ROW_LIMIT = 100
-
 
 def _is_table_like(value: Any) -> bool:
     """True for DataFrame-style objects from common Python data libraries.
@@ -85,8 +81,17 @@ def _is_table_like(value: Any) -> bool:
 def serialize_value(
     value: Any,
     encoding: str = "json",
+    view: VarView | None = None,
 ) -> tuple[Any, str | None]:
     """Serialize a value for the wire.
+
+    Args:
+        value: Python value to serialize.
+        encoding: ``"json"`` or ``"arrow_ipc"``.
+        view: Optional per-variable rendering hints (row limit, offset).
+            Applied at the top-level table shape only. ``arrow_ipc``
+            ignores ``view`` today; the IPC stream always carries the full
+            table.
 
     Returns:
         (inline_value, blob_ref) — one of these will be non-None.
@@ -94,15 +99,23 @@ def serialize_value(
         be served at that ref URL.
     """
     if encoding == "json":
-        return _to_json(value), None
+        return _to_json(value, view=view), None
     if encoding == "arrow_ipc":
         return None, _to_arrow_ipc_ref(value)
     # Default: attempt JSON
-    return _to_json(value), None
+    return _to_json(value, view=view), None
 
 
-def _to_json(value: Any) -> Any:
-    """Convert a Python value to a JSON-compatible form."""
+def _to_json(value: Any, view: VarView | None = None) -> Any:
+    """Convert a Python value to a JSON-compatible form.
+
+    ``view`` is only consulted for the *top-level* tabular shape. Nested
+    tables (a dict of dataframes, a list of arrow tables) get serialized
+    in full — applying a row offset/limit to a deeply nested structure
+    has no obvious correct semantics, and the use case is "I subscribed
+    to a table; render N rows of it." Subscribe to the nested handle
+    directly if you need pagination of it.
+    """
     if value is None:
         return None
     if isinstance(value, (bool, int, float, str)):
@@ -117,27 +130,27 @@ def _to_json(value: Any) -> Any:
     type_name = type(value).__name__
     module = type(value).__module__
 
-    # All table-shaped values get capped at JSON_TABLE_ROW_LIMIT — the
-    # JSON channel is the preview path and full materialization on
-    # every update is the surprise we explicitly don't want here.
-    n = JSON_TABLE_ROW_LIMIT
+    # Tabular values: honor ``view`` if present; otherwise return the full
+    # frame. The default is unlimited — callers explicitly opt in to
+    # truncation when they want a preview-shaped payload.
     if module.startswith("pandas") and type_name == "DataFrame":
-        return value.head(n).to_dict(orient="records")
+        sliced = _apply_view_pandas(value, view)
+        return sliced.to_dict(orient="records")
     if module.startswith("polars") and type_name == "DataFrame":
-        return value.head(n).to_dicts()
+        return _apply_view_polars(value, view).to_dicts()
     if module.startswith("polars") and type_name == "LazyFrame":
-        # ``head`` on a LazyFrame is a query rewrite, so the limit
-        # pushes down — we never collect the full plan.
-        return value.head(n).collect().to_dicts()
+        # ``slice`` on a LazyFrame is a query rewrite, so the bounds push
+        # down — we never collect more than the requested window.
+        return _apply_view_polars_lazy(value, view).collect().to_dicts()
     if module.startswith("pyarrow") and type_name in ("Table", "RecordBatch"):
-        # ``slice`` on Arrow is zero-copy and bounded by ``n``.
-        return value.slice(0, n).to_pylist()
+        # ``slice`` on Arrow is zero-copy.
+        return _apply_view_arrow(value, view).to_pylist()
     if type_name == "DuckDBPyRelation":
         # ``limit`` is a relational rewrite; the engine never produces
-        # the rows past ``n``. Pair each row tuple with the column
+        # rows past the window. Pair each row tuple with the column
         # names so the client gets the JSON-records shape it expects.
-        limited = value.limit(n)
-        return [dict(zip(limited.columns, row)) for row in limited.fetchall()]
+        rel = _apply_view_duckdb(value, view)
+        return [dict(zip(rel.columns, row)) for row in rel.fetchall()]
 
     if type_name == "ndarray" and module.startswith("numpy"):
         return value.tolist()
@@ -146,6 +159,62 @@ def _to_json(value: Any) -> Any:
         return repr(value)
     except Exception:
         return f"<{type_name}>"
+
+
+# ---------------------------------------------------------------------------
+# Per-engine view application
+#
+# Each helper is the bare minimum that engine-specific slicing requires; the
+# branches sit in the JSON path above. They're factored out so the call
+# sites stay declarative and so a future "preview" hook can call into them
+# directly without duplicating the dispatch logic.
+# ---------------------------------------------------------------------------
+
+
+def _apply_view_pandas(df: Any, view: VarView | None) -> Any:
+    if view is None or (view.row_limit is None and view.row_offset == 0):
+        return df
+    start = view.row_offset
+    stop = (
+        start + view.row_limit if view.row_limit is not None else None
+    )
+    return df.iloc[start:stop]
+
+
+def _apply_view_polars(df: Any, view: VarView | None) -> Any:
+    if view is None or (view.row_limit is None and view.row_offset == 0):
+        return df
+    return df.slice(view.row_offset, view.row_limit)
+
+
+def _apply_view_polars_lazy(lf: Any, view: VarView | None) -> Any:
+    if view is None or (view.row_limit is None and view.row_offset == 0):
+        return lf
+    return lf.slice(view.row_offset, view.row_limit)
+
+
+def _apply_view_arrow(value: Any, view: VarView | None) -> Any:
+    if view is None or (view.row_limit is None and view.row_offset == 0):
+        return value
+    # ``Table.slice(offset, length)`` and ``RecordBatch.slice(offset, length)``
+    # share the same signature; ``length=None`` clamps to end-of-table.
+    if view.row_limit is None:
+        return value.slice(view.row_offset)
+    return value.slice(view.row_offset, view.row_limit)
+
+
+def _apply_view_duckdb(rel: Any, view: VarView | None) -> Any:
+    if view is None or (view.row_limit is None and view.row_offset == 0):
+        return rel
+    # ``limit(n, offset=k)`` is a relational rewrite that pushes the
+    # window into the plan.
+    if view.row_limit is None:
+        # DuckDB's ``limit`` requires a count; use a very large sentinel
+        # rather than collecting eagerly for "everything past offset".
+        # Callers paginating without a stop should use successive offset
+        # bumps instead.
+        return rel.limit(2**63 - 1, offset=view.row_offset)
+    return rel.limit(view.row_limit, offset=view.row_offset)
 
 
 def _to_arrow_ipc_ref(value: Any) -> str:

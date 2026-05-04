@@ -132,6 +132,17 @@ export interface DataflowClientOptions {
   debounceMs?: number;
 }
 
+/**
+ * Per-variable rendering hint shaped like ``protocol.VarView``. The server
+ * only honors these for tabular values; everything else ignores them. The
+ * caller owns truncation: when ``rowLimit`` is omitted the server returns
+ * the full table.
+ */
+export interface VarView {
+  rowLimit?: number;
+  rowOffset?: number;
+}
+
 export class DataflowClient {
   private readonly baseUrl: string;
   private autoRun: boolean;
@@ -159,6 +170,10 @@ export class DataflowClient {
   // ``subscribe`` set on /run so the kernel only computes what the UI cares
   // about; mounting/unmounting components dynamically reshapes the graph.
   private subRefcount = new Map<string, number>();
+  // Per-variable rendering hints. Sent in the ``views`` slot of /run so
+  // the server can pre-shape (e.g. paginate) tabular values before they
+  // hit the wire. Empty = no hint, server returns the full payload.
+  private views = new Map<string, VarView>();
 
   private varListeners = new Map<string, Set<() => void>>();
   private inputListeners = new Map<string, Set<() => void>>();
@@ -189,6 +204,37 @@ export class DataflowClient {
   /** Enable or disable autorun on input changes. Run buttons always fire. */
   setAutoRun(value: boolean): void {
     this.autoRun = value;
+  }
+
+  /**
+   * Set (or clear) the per-variable view hint sent on the next ``/run``.
+   *
+   * Pass ``null`` to clear the hint and revert to the server default
+   * (full payload). With autorun on, a meaningful change schedules a
+   * debounced run so the new view shape lands on screen the same way an
+   * input change would.
+   */
+  setView(name: string, view: VarView | null): void {
+    const prev = this.views.get(name);
+    if (view === null) {
+      if (prev === undefined) return;
+      this.views.delete(name);
+    } else {
+      if (
+        prev !== undefined &&
+        prev.rowLimit === view.rowLimit &&
+        prev.rowOffset === view.rowOffset
+      ) {
+        return;
+      }
+      this.views.set(name, view);
+    }
+    if (this.autoRun && this.subRefcount.get(name)) this.scheduleRun();
+  }
+
+  /** Read the current view hint, if any, for a variable. */
+  getView(name: string): VarView | undefined {
+    return this.views.get(name);
   }
 
   // ---------- schema ----------
@@ -426,6 +472,14 @@ export class DataflowClient {
     );
     const inputs: Record<string, unknown> = {};
     for (const [k, v] of this.inputs) inputs[k] = v;
+    // Only send views for vars actually subscribed this run. Stale entries
+    // (a component unmounted but the view stayed in the map) are filtered
+    // out instead of growing the request body indefinitely.
+    let views: Record<string, VarView> | undefined;
+    for (const name of subscribed) {
+      const v = this.views.get(name);
+      if (v !== undefined) (views ??= {})[name] = v;
+    }
 
     this.runStartedAt = performance.now();
     this.pendingSubscribed = new Set(subscribed);
@@ -445,7 +499,7 @@ export class DataflowClient {
           "content-type": "application/json",
           accept: "text/event-stream",
         },
-        body: JSON.stringify({ inputs, subscribe: subscribed }),
+        body: JSON.stringify({ inputs, subscribe: subscribed, views }),
         signal: abort.signal,
       });
       if (!resp.ok || !resp.body) {
@@ -817,6 +871,26 @@ export function useDataflowVariable<T = unknown>(
     () => client.getValue(name) as VarUpdate<T> | undefined,
     () => client.getValue(name) as VarUpdate<T> | undefined,
   );
+}
+
+/**
+ * Apply a per-variable rendering hint (row limit, offset, ...) for the
+ * lifetime of the calling component. The hint is included in every
+ * subsequent ``/run`` request and torn down on unmount; callers don't
+ * need to manage cleanup explicitly. Pair with ``useDataflowValue`` (or
+ * subscribe via ``<Inspectable>``) to actually pull the variable.
+ *
+ * Use case: pass ``{ rowLimit: 100 }`` for a large dataframe in a debug
+ * pane while another component subscribes to the full frame; both
+ * settings flow through the same wire request.
+ */
+export function useDataflowView(name: string, view: VarView | null): void {
+  const client = useClient();
+  useEffect(() => {
+    if (!name) return;
+    client.setView(name, view);
+    return () => client.setView(name, null);
+  }, [client, name, view?.rowLimit, view?.rowOffset]);
 }
 
 /**

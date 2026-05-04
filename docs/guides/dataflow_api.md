@@ -272,13 +272,23 @@ Request:
 ```json
 {
   "inputs":    { "threshold": 50, "category": "A" },
-  "subscribe": ["stats"]
+  "subscribe": ["stats", "filtered"],
+  "views":     { "filtered": { "rowLimit": 100, "rowOffset": 0 } }
 }
 ```
 
 If `subscribe` is empty the server defaults to *all* outputs. Subscribing
 to a strict subset is what enables pruning: the kernel runs only cells
 that feed the subscribed outputs.
+
+`views` is an optional per-variable hint applied during JSON serialization.
+Today only table-shaped values use it (`rowLimit` + `rowOffset`).
+**There is no implicit row cap**: omit `views.foo.rowLimit` and the server
+serializes the entire frame for `foo`. Pass an explicit limit when you
+want a preview-shaped payload (debug pop-overs, dashboard tiles), and
+bump `rowOffset` by `rowLimit` between calls for stateless pagination. The
+bounds push down through polars `LazyFrame` and DuckDB plans, so a slim
+window on a huge frame doesn't materialize the whole table server-side.
 
 Response: `text/event-stream` with the closed event union below.
 
@@ -319,6 +329,7 @@ reads changes.
 | `useDataflowRun()`                | Imperative `() => void` to trigger a run (bypasses debounce)                                         |
 | `useDataflowSubscriptions()`      | Names currently subscribed to (refcount > 0). Useful for debug surfaces                              |
 | `useDataflowValuesSnapshot()`     | All variables received this session, keyed by name. Re-renders on *any* update — for debug only      |
+| `useDataflowView(name, view)`     | Lifetime-managed per-variable serialization hint (e.g. `{rowLimit, rowOffset}`). Sent on every `/run` while mounted; cleared on unmount |
 | `useDataflowClient()`             | Escape hatch returning the underlying `DataflowClient`                                               |
 
 `<DataflowProvider>` accepts:

@@ -190,6 +190,7 @@ class DataflowFileBundle:
         subscribed: set[str],
         consumer_id: str,
         run_id: str,
+        views: dict[str, dict[str, Any]] | None = None,
         request: HTTPRequest | None = None,
         timeout: float = 60.0,
     ) -> AsyncIterator[DataflowEvent]:
@@ -221,6 +222,7 @@ class DataflowFileBundle:
             subscribed=sorted(subscribed),
             prune=prune,
             request=request,
+            views=views or {},
         )
         session.put_control_request(
             scoped, from_consumer_id=ConsumerId(consumer_id)
