@@ -879,6 +879,95 @@ class GetCacheInfoCommand(Command):
     """
 
 
+# ---------------------------------------------------------------------------
+# Dataflow API commands
+#
+# These drive marimo's "dataflow API" mode: a notebook served as a typed
+# reactive function via HTTP/SSE, where clients push input overrides and
+# receive variable-level updates. See `marimo._dataflow.protocol` and
+# `development_docs/dataflow_api.md` for the wire shape.
+# ---------------------------------------------------------------------------
+
+
+class SetDataflowSubscriptionsCommand(Command):
+    """Register the variables a dataflow consumer wants real values for.
+
+    The kernel uses the union of all consumers' subscriptions to decide which
+    variables to serialize and broadcast as ``DataflowVarNotification``s.
+    Each consumer filters the broadcast stream by ``consumer_id`` to receive
+    only its own events.
+
+    Attributes:
+        consumer_id: Identifier of the dataflow SSE consumer.
+        subscribed: Variable names this consumer wants updates for.
+        views: Per-variable rendering hints (row limit, offset, ...). Keyed
+            by variable name; absent = no hint, full payload.
+    """
+
+    consumer_id: str
+    subscribed: list[str]
+    views: dict[str, dict[str, Any]] = msgspec.field(default_factory=dict)
+
+
+class RemoveDataflowSubscriptionsCommand(Command):
+    """Drop a dataflow consumer's subscription entry.
+
+    Sent on consumer detach so the kernel can prune its subscription map
+    and stop serializing values that nobody wants.
+
+    Attributes:
+        consumer_id: Identifier of the dataflow SSE consumer.
+    """
+
+    consumer_id: str
+
+
+class GetDataflowSchemaCommand(Command):
+    """Request a fresh ``dataflow-schema`` broadcast.
+
+    Used by the dataflow API on attach when no schema has been broadcast
+    yet (e.g. before the initial reactive run completes).
+    """
+
+
+class ScopedRunCommand(Command):
+    """Apply input overrides and run reactively, optionally pruned to a scope.
+
+    The dataflow API uses this as the single per-request command instead of
+    issuing ``UpdateUIElementCommand`` directly: it carries a subscription
+    scope so the kernel can prune its reactive cell set when no editor
+    consumer is observing the session.
+
+    Attributes:
+        consumer_id: Identifier of the dataflow SSE consumer driving this run.
+        run_id: Client-supplied run identifier; echoed in emitted events.
+        inputs: Map of UI element ``object_id`` to new value.
+        subscribed: Variables the consumer wants emitted values for after the
+            run. The kernel always uses this for filtering ``dataflow-var``
+            broadcasts; it's also used for cell pruning when ``prune`` is
+            true.
+        prune: If true, the kernel prunes its reactive cell set to those
+            needed for ``subscribed``. The host-side bundle sets this only
+            when no non-dataflow consumer (e.g. an editor websocket) is
+            attached, so editor-attached runs always exercise the full
+            reactive graph.
+        request: HTTP request context if available.
+    """
+
+    consumer_id: str
+    run_id: str
+    inputs: dict[UIElementId, Any]
+    subscribed: list[str]
+    prune: bool = False
+    request: HTTPRequest | None = None
+    # Per-variable rendering hints applied during serialization (row limit,
+    # offset, ...). Keyed by variable name; absent = no hint, full payload.
+    # ``dict[str, Any]`` because ``protocol.VarView`` is a wire struct that
+    # the kernel layer doesn't import directly — the host bundle decodes it
+    # to a plain dict before issuing the command.
+    views: dict[str, dict[str, Any]] = msgspec.field(default_factory=dict)
+
+
 CommandMessage = (
     # Notebook operations
     CreateNotebookCommand
@@ -916,6 +1005,11 @@ CommandMessage = (
     # Cache management
     | ClearCacheCommand
     | GetCacheInfoCommand
+    # Dataflow API
+    | SetDataflowSubscriptionsCommand
+    | RemoveDataflowSubscriptionsCommand
+    | GetDataflowSchemaCommand
+    | ScopedRunCommand
     # Kernel operations
     | StopKernelCommand
 )
