@@ -19,6 +19,7 @@ __pycache__/
 # Distribution / packaging
 .Python
 build/
+!frontend/src/core/build/
 develop-eggs/
 dist/
 downloads/
@@ -121,6 +122,7 @@ marimo/_lsp/
 .marimo.toml
 .mypy_cache/
 __marimo__
+__marimo_build__
 .aider*
 
 # pixi environments
